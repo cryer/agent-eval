@@ -1,0 +1,52 @@
+name: agent-eval-gate
+
+# PR 回归门禁：用目标分支的代码跑 baseline，用 PR 代码跑 candidate，
+# 统计对比两者——显著回归则 block。示例用 stub judge，无需 API key；
+# 真实场景把 --judge-backend 换成 litellm 并配置模型密钥（secrets）。
+
+on:
+  pull_request:
+
+jobs:
+  regression-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run baseline (target branch code)
+        run: |
+          git worktree add ../baseline origin/${{ github.base_ref }}
+          python -m pip install -q -e ../baseline
+          cd ../baseline
+          python -m agent_eval.cli run \
+            --cases examples/cases.yaml \
+            --agent examples.toy_agent:agent \
+            --judge-backend stub \
+            --samples 2 \
+            --run-id baseline \
+            --db "$GITHUB_WORKSPACE/eval.db"
+
+      - name: Run candidate (this PR)
+        run: |
+          python -m pip install -q -e .
+          python -m agent_eval.cli run \
+            --cases examples/cases.yaml \
+            --agent examples.toy_agent:agent \
+            --judge-backend stub \
+            --samples 2 \
+            --run-id candidate \
+            --db eval.db
+
+      - name: Trace diff report
+        if: always()
+        run: python -m agent_eval.cli diff baseline candidate --db eval.db
+
+      - name: Regression gate
+        run: python -m agent_eval.cli compare baseline candidate --db eval.db
+        # exit 2 = significant regression -> job fails -> PR blocked
