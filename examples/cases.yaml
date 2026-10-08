@@ -5,6 +5,40 @@
     - output_contains: "7 天"
     - output_not_contains: "不能退款"
     - max_cost_usd: 0.01
+    # LLM-as-judge 断言：离线演示用 --judge-backend stub，真实场景用 litellm
+    - judge:
+        rubric: '回答必须准确说明退款政策，包括 "7 天" 无理由退款期限'
+        threshold: 0.5
+
+- id: refund_deadline
+  input: "我签收 5 天了，还能退款吗？"
+  assertions:
+    - tool_called: lookup_order
+    - output_contains: "7 天"
+
+- id: refund_shipping_fee
+  input: "退货的运费谁承担？"
+  assertions:
+    - tool_called: lookup_order
+    - output_contains: "商家承担"
+
+- id: refund_used_item
+  input: "商品拆封用过了还能退款吗？"
+  assertions:
+    - tool_called: lookup_order
+    - output_contains: "7 天"
+
+- id: return_process
+  input: "退货流程怎么走？"
+  assertions:
+    - tool_called: lookup_order
+    - output_contains: "7 天"
+
+- id: exchange_instead
+  input: "不想退货了，能直接退款吗？"
+  assertions:
+    - tool_called: lookup_order
+    - output_contains: "7 天"
 
 - id: greeting
   input: "你好"

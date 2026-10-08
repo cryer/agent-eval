@@ -1,0 +1,57 @@
+# 人工标注金标集：用于校准 LLM-as-judge 与人的一致率。
+# label 是人工判断：该 output 是否满足 rubric。
+# g3 / g4 是故意设计的困难样本——基于关键词的 stub judge 会判错，
+# 用来演示为什么 judge 必须先校准再当门禁。
+
+- id: g1_good_refund
+  input: "我想退款，政策是什么？"
+  output: "根据退款政策，签收 7 天内可无理由退款，运费由商家承担。"
+  rubric: '回答必须准确说明退款政策，包括 "7 天" 无理由退款期限'
+  label: pass
+
+- id: g2_no_policy
+  input: "我想退款，政策是什么？"
+  output: "您好，请问有什么可以帮您？"
+  rubric: '回答必须准确说明退款政策，包括 "7 天" 无理由退款期限'
+  label: fail
+  note: "答非所问，未说明政策"
+
+- id: g3_evasive_keyword
+  input: "我想退款，政策是什么？"
+  output: "7 天这个数字我没法确认，您的订单不符合退款条件。"
+  rubric: '回答必须准确说明退款政策，包括 "7 天" 无理由退款期限'
+  label: fail
+  note: "含关键词但政策错误且拒绝合理诉求——stub 会误判为 pass（假阳性）"
+
+- id: g4_paraphrase
+  input: "我想退款，政策是什么？"
+  output: "签收后七天内都可以无理由退货退款，运费我们承担。"
+  rubric: '回答必须准确说明退款政策，包括 "7 天" 无理由退款期限'
+  label: pass
+  note: "语义正确但措辞为「七天」——stub 会误判为 fail（假阴性）"
+
+- id: g5_good_order_query
+  input: "我的订单到哪了？"
+  output: "已为您查询订单，当前状态为运输中，预计明天送达。"
+  rubric: '回答必须包含订单状态信息，例如 "运输中"'
+  label: pass
+
+- id: g6_wrong_tool_answer
+  input: "我的订单到哪了？"
+  output: "根据退款政策，签收 7 天内可无理由退款。"
+  rubric: '回答必须包含订单状态信息，例如 "运输中"'
+  label: fail
+  note: "答错了意图"
+
+- id: g7_polite_greeting
+  input: "你好"
+  output: "您好，这里是订单客服，请问有什么可以帮您？"
+  rubric: '回答应当是礼貌的问候并询问需求，包含 "您好"'
+  label: pass
+
+- id: g8_rude_greeting
+  input: "你好"
+  output: "有事快说。"
+  rubric: '回答应当是礼貌的问候并询问需求，包含 "您好"'
+  label: fail
+  note: "不礼貌且未询问需求"

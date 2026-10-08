@@ -32,12 +32,22 @@ CREATE TABLE IF NOT EXISTS case_results (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      TEXT NOT NULL REFERENCES runs(run_id),
     case_id     TEXT NOT NULL,
+    sample_idx  INTEGER NOT NULL DEFAULT 0,
     passed      INTEGER NOT NULL,
     output      TEXT NOT NULL,
     assertions  TEXT NOT NULL,
     trace_id    TEXT NOT NULL,
     duration_ms REAL NOT NULL,
     cost_usd    REAL NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS calibrations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    judge       TEXT NOT NULL,
+    golden_path TEXT NOT NULL,
+    metrics     TEXT NOT NULL,
+    details     TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
 """
@@ -55,6 +65,16 @@ class Storage:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        # sample_idx was added after the first schema version
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(case_results)")}
+        if "sample_idx" not in cols:
+            self._conn.execute(
+                "ALTER TABLE case_results ADD COLUMN sample_idx INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -122,15 +142,18 @@ class Storage:
         trace_id: str,
         duration_ms: float,
         cost_usd: float,
+        sample_idx: int = 0,
     ) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO case_results"
-                " (run_id, case_id, passed, output, assertions, trace_id, duration_ms, cost_usd, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " (run_id, case_id, sample_idx, passed, output, assertions, trace_id,"
+                " duration_ms, cost_usd, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     case_id,
+                    sample_idx,
                     int(passed),
                     output,
                     json.dumps(assertions, ensure_ascii=False),
@@ -142,9 +165,54 @@ class Storage:
             )
             self._conn.commit()
 
+    def get_run_results(self, run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM case_results WHERE run_id = ? ORDER BY case_id, sample_idx",
+                (run_id,),
+            ).fetchall()
+        return [
+            {**dict(r), "assertions": json.loads(r["assertions"])}
+            for r in rows
+        ]
+
     def list_runs(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM runs ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- calibrations ----
+
+    def record_calibration(
+        self,
+        judge: str,
+        golden_path: str,
+        metrics: dict[str, float],
+        details: list[dict],
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO calibrations (judge, golden_path, metrics, details, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    judge,
+                    golden_path,
+                    json.dumps(metrics),
+                    json.dumps(details, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def list_calibrations(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM calibrations ORDER BY created_at DESC"
+            ).fetchall()
+        return [
+            {**dict(r), "metrics": json.loads(r["metrics"]), "details": json.loads(r["details"])}
+            for r in rows
+        ]

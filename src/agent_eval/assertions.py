@@ -120,13 +120,27 @@ _REGISTRY = {
 }
 
 
-def build_assertions(spec_list: list[dict[str, Any]]) -> list[Assertion]:
-    """Build assertion objects from a YAML/JSON spec like `- tool_called: lookup_order`."""
+def build_assertions(spec_list: list[dict[str, Any]], judge=None) -> list[Assertion]:
+    """Build assertion objects from a YAML/JSON spec like `- tool_called: lookup_order`.
+
+    `judge` assertions require a Judge instance (see judge.py); pass judge=None
+    only for case files that use purely rule-based assertions.
+    """
     assertions: list[Assertion] = []
     for spec in spec_list or []:
         if not isinstance(spec, dict) or len(spec) != 1:
             raise ValueError(f"assertion spec must be a single-key mapping, got: {spec!r}")
         (kind, value), = spec.items()
+        if kind == "judge":
+            if judge is None:
+                raise ValueError(
+                    "case uses a `judge` assertion but no judge backend was given "
+                    "(use --judge-backend litellm|stub)"
+                )
+            from .judge import JudgeAssertion  # lazy: judge.py imports this module
+
+            assertions.append(JudgeAssertion(judge, value))
+            continue
         cls = _REGISTRY.get(kind)
         if cls is None:
             raise ValueError(f"unknown assertion kind {kind!r}; available: {sorted(_REGISTRY)}")

@@ -13,6 +13,9 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[project.optional-dependencies]
+llm = ["litellm>=1.0"]
+
 [project.scripts]
 agent-eval = "agent_eval.cli:main"
 
