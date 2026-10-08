@@ -6,6 +6,7 @@ import json
 import sys
 
 from .calibration import load_golden, run_calibration, store_calibration
+from .diff import diff_runs
 from .judge import Judge, build_backend
 from .runner import load_cases, run_cases
 from .stats import mcnemar_exact, paired_bootstrap
@@ -52,7 +53,11 @@ def _cmd_run(args) -> int:
     try:
         tracer = init_tracing(storage)
         cases = load_cases(args.cases, judge=judge)
-        summary = run_cases(agent_fn, cases, storage, tracer, samples=args.samples)
+        if args.run_id:
+            storage.delete_run_results(args.run_id)
+        summary = run_cases(
+            agent_fn, cases, storage, tracer, run_id=args.run_id, samples=args.samples
+        )
         storage.record_run(
             run_id=summary.run_id,
             agent=args.agent,
@@ -176,6 +181,33 @@ def _cmd_compare(args) -> int:
         storage.close()
 
 
+def _cmd_diff(args) -> int:
+    storage = Storage(args.db)
+    try:
+        diffs = diff_runs(storage, args.run_a, args.run_b)
+        if not diffs:
+            print(f"runs {args.run_a} and {args.run_b} have no cases in common")
+            return 1
+        changed = [d for d in diffs if d.changed]
+        print(f"trajectory diff  A={args.run_a} -> B={args.run_b}\n")
+        for d in changed:
+            print(f"case {d.case_id}  pass_rate {d.pass_rate_a:.2f} -> {d.pass_rate_b:.2f}")
+            if d.tool_diff:
+                print("  tool call sequence:")
+                for line in d.tool_diff:
+                    print(f"    {line}")
+            if d.output_diff:
+                print("  output:")
+                for line in d.output_diff:
+                    print(f"    {line}")
+            print()
+        unchanged = len(diffs) - len(changed)
+        print(f"{len(changed)} cases changed, {unchanged} unchanged")
+        return 0
+    finally:
+        storage.close()
+
+
 def _cmd_history(args) -> int:
     storage = Storage(args.db)
     try:
@@ -230,8 +262,19 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--agent", required=True, help="agent callable as module:attr")
     run_p.add_argument("--db", default="eval.db", help="SQLite trace DB path")
     run_p.add_argument("--samples", type=int, default=1, help="samples per case (pass^k)")
+    run_p.add_argument(
+        "--run-id",
+        default=None,
+        help="pin the run id (e.g. baseline/candidate in CI); re-running replaces old results",
+    )
     _add_judge_args(run_p, required=False)
     run_p.set_defaults(func=_cmd_run)
+
+    diff_p = sub.add_parser("diff", help="trajectory diff between two runs")
+    diff_p.add_argument("run_a", help="baseline run id")
+    diff_p.add_argument("run_b", help="candidate run id")
+    diff_p.add_argument("--db", default="eval.db")
+    diff_p.set_defaults(func=_cmd_diff)
 
     cal_p = sub.add_parser("calibrate", help="measure judge agreement with human labels")
     cal_p.add_argument("--golden", required=True, help="path to golden set YAML file")

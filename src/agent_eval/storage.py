@@ -165,6 +165,12 @@ class Storage:
             )
             self._conn.commit()
 
+    def delete_run_results(self, run_id: str) -> None:
+        """Remove prior results of a run so re-running the same run_id is idempotent."""
+        with self._lock:
+            self._conn.execute("DELETE FROM case_results WHERE run_id = ?", (run_id,))
+            self._conn.commit()
+
     def get_run_results(self, run_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
