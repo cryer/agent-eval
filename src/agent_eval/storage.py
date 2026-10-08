@@ -165,10 +165,25 @@ class Storage:
             )
             self._conn.commit()
 
-    def delete_run_results(self, run_id: str) -> None:
-        """Remove prior results of a run so re-running the same run_id is idempotent."""
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
-            self._conn.execute("DELETE FROM case_results WHERE run_id = ?", (run_id,))
+            row = self._conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_run_results(self, run_id: str, case_ids: list[str] | None = None) -> None:
+        """Remove prior results of a run so re-running is idempotent.
+        With case_ids, only those cases are cleared — a run may combine
+        static cases and scenarios under one run id."""
+        with self._lock:
+            if case_ids is None:
+                self._conn.execute("DELETE FROM case_results WHERE run_id = ?", (run_id,))
+            else:
+                self._conn.executemany(
+                    "DELETE FROM case_results WHERE run_id = ? AND case_id = ?",
+                    [(run_id, cid) for cid in case_ids],
+                )
             self._conn.commit()
 
     def get_run_results(self, run_id: str) -> list[dict[str, Any]]:

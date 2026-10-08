@@ -9,6 +9,7 @@ from .calibration import load_golden, run_calibration, store_calibration
 from .diff import diff_runs
 from .judge import Judge, build_backend
 from .runner import load_cases, run_cases
+from .simulation import load_scenarios, run_scenarios
 from .stats import mcnemar_exact, paired_bootstrap
 from .storage import Storage
 from .tracing import init_tracing
@@ -46,6 +47,29 @@ def _add_judge_args(p: argparse.ArgumentParser, required: bool) -> None:
     p.add_argument("--judge-model", default="gpt-4o-mini", help="model for the litellm backend")
 
 
+def _print_summary(summary, agent_spec: str, source: str) -> None:
+    print(
+        f"run {summary.run_id}  agent={agent_spec}  {source}"
+        f"  samples={summary.samples_per_case}\n"
+    )
+    for report in summary.reports:
+        status = "PASS" if report.passed else "FAIL"
+        n_ok = sum(1 for s in report.samples if s.passed)
+        sample_info = f"samples {n_ok}/{len(report.samples)}, pass_rate={report.pass_rate:.2f}"
+        print(
+            f"{status}  {report.case.id}  ({sample_info},"
+            f" {report.duration_ms:.1f}ms, ${report.cost_usd:.6f})"
+        )
+        for s in report.samples:
+            for r in s.results:
+                if not r.passed:
+                    print(f"      x [sample {s.sample_idx}] {r.name}: {r.detail}")
+    print(
+        f"\n{summary.passed}/{summary.total} cases passed"
+        f"  (mean pass rate {summary.mean_pass_rate:.2f})"
+    )
+
+
 def _cmd_run(args) -> int:
     agent_fn = _load_agent(args.agent)
     judge = _build_judge(args)
@@ -54,40 +78,56 @@ def _cmd_run(args) -> int:
         tracer = init_tracing(storage)
         cases = load_cases(args.cases, judge=judge)
         if args.run_id:
-            storage.delete_run_results(args.run_id)
+            storage.delete_run_results(args.run_id, case_ids=[c.id for c in cases])
         summary = run_cases(
             agent_fn, cases, storage, tracer, run_id=args.run_id, samples=args.samples
         )
+        existing = storage.get_run(summary.run_id)
         storage.record_run(
             run_id=summary.run_id,
             agent=args.agent,
-            cases_path=args.cases,
-            total=summary.total,
-            passed=summary.passed,
+            cases_path=f"{existing['cases_path']} + {args.cases}" if existing else args.cases,
+            total=summary.total + (existing["total"] if existing else 0),
+            passed=summary.passed + (existing["passed"] if existing else 0),
         )
+        _print_summary(summary, args.agent, f"cases={args.cases}")
+        return 0 if summary.ok else 1
+    finally:
+        storage.close()
 
-        print(
-            f"run {summary.run_id}  agent={args.agent}  cases={args.cases}"
-            f"  samples={summary.samples_per_case}\n"
+
+def _cmd_simulate(args) -> int:
+    agent_fn = _load_agent(args.agent)
+    judge = _build_judge(args)
+    storage = Storage(args.db)
+    try:
+        tracer = init_tracing(storage)
+        scenarios = load_scenarios(args.scenarios, judge=judge)
+        user_backend = (
+            None if args.user_backend == "stub" else build_backend("litellm", args.user_model)
         )
-        for report in summary.reports:
-            status = "PASS" if report.passed else "FAIL"
-            n_ok = sum(1 for s in report.samples if s.passed)
-            sample_info = (
-                f"samples {n_ok}/{len(report.samples)}, pass_rate={report.pass_rate:.2f}"
-            )
-            print(
-                f"{status}  {report.case.id}  ({sample_info},"
-                f" {report.duration_ms:.1f}ms, ${report.cost_usd:.6f})"
-            )
-            for s in report.samples:
-                for r in s.results:
-                    if not r.passed:
-                        print(f"      x [sample {s.sample_idx}] {r.name}: {r.detail}")
-        print(
-            f"\n{summary.passed}/{summary.total} cases passed"
-            f"  (mean pass rate {summary.mean_pass_rate:.2f})"
+        if args.run_id:
+            storage.delete_run_results(args.run_id, case_ids=[s.id for s in scenarios])
+        summary = run_scenarios(
+            agent_fn,
+            scenarios,
+            storage,
+            tracer,
+            user_backend=user_backend,
+            run_id=args.run_id,
+            samples=args.samples,
         )
+        existing = storage.get_run(summary.run_id)
+        total = summary.total + (existing["total"] if existing else 0)
+        passed = summary.passed + (existing["passed"] if existing else 0)
+        storage.record_run(
+            run_id=summary.run_id,
+            agent=args.agent,
+            cases_path=f"{existing['cases_path']} + {args.scenarios}" if existing else args.scenarios,
+            total=total,
+            passed=passed,
+        )
+        _print_summary(summary, args.agent, f"scenarios={args.scenarios}")
         return 0 if summary.ok else 1
     finally:
         storage.close()
@@ -269,6 +309,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_judge_args(run_p, required=False)
     run_p.set_defaults(func=_cmd_run)
+
+    sim_p = sub.add_parser(
+        "simulate", help="multi-turn rollout against persona-based simulated users"
+    )
+    sim_p.add_argument("--scenarios", required=True, help="path to scenarios YAML file")
+    sim_p.add_argument("--agent", required=True, help="agent callable as module:attr; takes message history")
+    sim_p.add_argument("--db", default="eval.db")
+    sim_p.add_argument("--samples", type=int, default=1, help="rollouts per scenario (pass^k)")
+    sim_p.add_argument("--run-id", default=None)
+    sim_p.add_argument(
+        "--user-backend",
+        choices=["stub", "litellm"],
+        default="stub",
+        help="stub = scripted personas only; litellm = LLM plays the user",
+    )
+    sim_p.add_argument("--user-model", default="gpt-4o-mini")
+    _add_judge_args(sim_p, required=False)
+    sim_p.set_defaults(func=_cmd_simulate)
 
     diff_p = sub.add_parser("diff", help="trajectory diff between two runs")
     diff_p.add_argument("run_a", help="baseline run id")

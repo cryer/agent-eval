@@ -31,6 +31,13 @@ jobs:
             --samples 2 \
             --run-id baseline \
             --db "$GITHUB_WORKSPACE/eval.db"
+          python -m agent_eval.cli simulate \
+            --scenarios examples/scenarios.yaml \
+            --agent examples.toy_chat_agent:agent \
+            --judge-backend stub \
+            --samples 2 \
+            --run-id baseline \
+            --db "$GITHUB_WORKSPACE/eval.db"
 
       - name: Run candidate (this PR)
         run: |
@@ -38,6 +45,13 @@ jobs:
           python -m agent_eval.cli run \
             --cases examples/cases.yaml \
             --agent examples.toy_agent:agent \
+            --judge-backend stub \
+            --samples 2 \
+            --run-id candidate \
+            --db eval.db
+          python -m agent_eval.cli simulate \
+            --scenarios examples/scenarios.yaml \
+            --agent examples.toy_chat_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
