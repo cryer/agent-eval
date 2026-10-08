@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -37,10 +38,17 @@ class JudgeBackend(Protocol):
 
 
 class LiteLLMBackend:
-    """Real model backend via LiteLLM (optional dependency)."""
+    """Real model backend via LiteLLM (optional dependency).
 
-    def __init__(self, model: str = "gpt-4o-mini"):
+    Without extra config it uses the model's default provider credentials.
+    With KIMI_API_BASE / KIMI_API_KEY set (or explicit api_base/api_key),
+    the model is routed to that OpenAI-compatible endpoint — e.g. Kimi K3.
+    """
+
+    def __init__(self, model: str = "gpt-4o-mini", api_base: str | None = None, api_key: str | None = None):
         self.model = model
+        self.api_base = api_base or os.environ.get("KIMI_API_BASE")
+        self.api_key = api_key or os.environ.get("KIMI_API_KEY")
 
     def complete(self, prompt: str) -> str:
         try:
@@ -50,10 +58,19 @@ class LiteLLMBackend:
                 "LiteLLM backend requires `pip install agent-eval[llm]` "
                 "(or use --judge-backend stub for offline runs)"
             ) from e
+        model = self.model
+        kwargs: dict = {}
+        if self.api_base:
+            # custom OpenAI-compatible endpoint: litellm needs the openai/ prefix
+            if "/" not in model:
+                model = f"openai/{model}"
+            kwargs["api_base"] = self.api_base
+            kwargs["api_key"] = self.api_key
         resp = completion(
-            model=self.model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
+            timeout=180,
+            **kwargs,
         )
         return resp.choices[0].message.content
 

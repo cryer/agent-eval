@@ -6,4 +6,5 @@ __pycache__/
 build/
 dist/
 eval.db
+.env
 .pytest_cache/
