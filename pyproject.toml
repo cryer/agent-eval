@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-eval"
+version = "0.1.0"
+description = "Regression evaluation harness for LLM agents: OTel tracing, SQLite storage, rule assertions, CI gate"
+requires-python = ">=3.10"
+dependencies = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+agent-eval = "agent_eval.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

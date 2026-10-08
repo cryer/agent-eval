@@ -1,0 +1,9 @@
+AGENTS.md
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+eval.db
+.pytest_cache/
