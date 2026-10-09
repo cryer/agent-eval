@@ -47,6 +47,12 @@ def _add_judge_args(p: argparse.ArgumentParser, required: bool) -> None:
     p.add_argument("--judge-model", default="gpt-4o-mini", help="model for the litellm backend")
 
 
+def _merge_paths(existing: str | None, new: str) -> str:
+    if not existing:
+        return new
+    return existing if new in existing.split(" + ") else f"{existing} + {new}"
+
+
 def _print_summary(summary, agent_spec: str, source: str) -> None:
     print(
         f"run {summary.run_id}  agent={agent_spec}  {source}"
@@ -83,12 +89,13 @@ def _cmd_run(args) -> int:
             agent_fn, cases, storage, tracer, run_id=args.run_id, samples=args.samples
         )
         existing = storage.get_run(summary.run_id)
+        total, passed = storage.run_totals(summary.run_id)
         storage.record_run(
             run_id=summary.run_id,
             agent=args.agent,
-            cases_path=f"{existing['cases_path']} + {args.cases}" if existing else args.cases,
-            total=summary.total + (existing["total"] if existing else 0),
-            passed=summary.passed + (existing["passed"] if existing else 0),
+            cases_path=_merge_paths(existing["cases_path"] if existing else None, args.cases),
+            total=total,
+            passed=passed,
         )
         _print_summary(summary, args.agent, f"cases={args.cases}")
         return 0 if summary.ok else 1
@@ -118,12 +125,11 @@ def _cmd_simulate(args) -> int:
             samples=args.samples,
         )
         existing = storage.get_run(summary.run_id)
-        total = summary.total + (existing["total"] if existing else 0)
-        passed = summary.passed + (existing["passed"] if existing else 0)
+        total, passed = storage.run_totals(summary.run_id)
         storage.record_run(
             run_id=summary.run_id,
             agent=args.agent,
-            cases_path=f"{existing['cases_path']} + {args.scenarios}" if existing else args.scenarios,
+            cases_path=_merge_paths(existing["cases_path"] if existing else None, args.scenarios),
             total=total,
             passed=passed,
         )

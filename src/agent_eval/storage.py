@@ -172,6 +172,18 @@ class Storage:
             ).fetchone()
         return dict(row) if row else None
 
+    def run_totals(self, run_id: str) -> tuple[int, int]:
+        """(total, passed) derived from case_results — a case passes iff every
+        recorded sample passed. Recomputing from results keeps the runs table
+        correct under idempotent reruns and mixed static+scenario runs."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT case_id, MIN(passed) AS case_passed FROM case_results"
+                " WHERE run_id = ? GROUP BY case_id",
+                (run_id,),
+            ).fetchall()
+        return len(rows), sum(r["case_passed"] for r in rows)
+
     def delete_run_results(self, run_id: str, case_ids: list[str] | None = None) -> None:
         """Remove prior results of a run so re-running is idempotent.
         With case_ids, only those cases are cleared — a run may combine
