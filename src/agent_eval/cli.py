@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
+from pathlib import Path
 
 from .calibration import load_golden, run_calibration, store_calibration
 from .diff import diff_runs
@@ -13,6 +15,29 @@ from .simulation import load_scenarios, run_scenarios
 from .stats import mcnemar_exact, paired_bootstrap
 from .storage import Storage
 from .tracing import init_tracing
+
+
+def _load_dotenv(path: str | Path = ".env") -> list[str]:
+    """Minimal .env loader so local runs don't need manual `export`.
+
+    KEY=VALUE lines, `#` comments, optional surrounding quotes. Existing
+    environment variables win — .env only fills in what is missing.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    loaded = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def _load_agent(spec: str):
@@ -363,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     trace_p.set_defaults(func=_cmd_trace)
 
     args = parser.parse_args(argv)
+    _load_dotenv()
     return args.func(args)
 
 
