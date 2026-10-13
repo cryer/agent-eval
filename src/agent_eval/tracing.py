@@ -47,6 +47,8 @@ def prompt_version(prompt: str) -> str:
 COST_PER_MTOK = {
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
+    # approximate — kimi k2 list rates; adjust to your plan's actual pricing
+    "k3": (0.60, 2.50),
 }
 
 
