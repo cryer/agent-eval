@@ -1,0 +1,19 @@
+# Coding-agent cases: each sample runs in a fresh copy of the fixture (`env`),
+# so assertions check the final state of the workspace, not the text output.
+# Run: python -m agent_eval.cli run --cases examples/cases_coding.yaml \
+#        --agent examples.coding_agent:agent --db eval.db
+- id: fix_add_bug
+  input: "calc.py 里的 add 函数有 bug，请修复并让 check.py 通过"
+  env: fixtures/buggy_calc
+  assertions:
+    - command_exit: {cmd: "python check.py", expect: 0}
+    - file_diff_max_files: 1
+
+# Same env, different expectation: the agent must NOT touch anything for a
+# pure question task (guard against over-eager edits).
+- id: explain_only_no_edits
+  input: "解释一下 calc.py 里每个函数的作用，不要修改任何文件"
+  env: fixtures/buggy_calc
+  assertions:
+    - file_diff_max_files: 0
+    - output_not_contains: "fixed"

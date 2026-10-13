@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import inspect
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -8,7 +12,7 @@ from typing import Any, Callable
 
 import yaml
 
-from .assertions import Assertion, AssertionResult, CaseContext, build_assertions
+from .assertions import Assertion, AssertionResult, CaseContext, FileDiffMaxFiles, build_assertions
 from .storage import Storage
 
 
@@ -17,6 +21,8 @@ class Case:
     id: str
     input: str
     assertions: list[Assertion]
+    # Fixture directory copied to a fresh scratch dir per sample (coding-agent cases).
+    env: str | None = None
 
 
 @dataclass
@@ -81,19 +87,60 @@ class RunSummary:
 
 
 def load_cases(path: str | Path, judge=None) -> list[Case]:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    path = Path(path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError(f"cases file must contain a YAML list, got {type(raw).__name__}")
+    base = path.resolve().parent
     cases = []
     for entry in raw:
+        env = entry.get("env")
         cases.append(
             Case(
                 id=entry["id"],
                 input=entry["input"],
                 assertions=build_assertions(entry.get("assertions", []), judge=judge),
+                env=str((base / env).resolve()) if env else None,
             )
         )
     return cases
+
+
+def _accepts_env(agent_fn: Callable) -> bool:
+    """Coding agents declare `fn(task, env_dir)`; text agents declare `fn(task)`."""
+    try:
+        params = list(inspect.signature(agent_fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    positional = [
+        p
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
+
+
+def _prepare_env(case: Case) -> str | None:
+    """Copy the case fixture into a fresh scratch dir; git-init it when a
+    file_diff assertion needs a baseline. Caller must clean up the result."""
+    if case.env is None:
+        return None
+    env_dir = tempfile.mkdtemp(prefix=f"agent_eval_{case.id}_")
+    shutil.rmtree(env_dir)
+    shutil.copytree(case.env, env_dir)
+    if any(isinstance(a, FileDiffMaxFiles) for a in case.assertions):
+        git = ["git", "-c", "user.email=agent-eval@local", "-c", "user.name=agent-eval"]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture baseline"]):
+            subprocess.run(
+                git + args, cwd=env_dir, capture_output=True
+            )  # best-effort; the assertion reports a missing repo
+        # Python bytecode caches are a side effect of running checks, not an edit
+        exclude = Path(env_dir) / ".git" / "info" / "exclude"
+        if exclude.exists():
+            exclude.write_text(exclude.read_text() + "\n__pycache__/\n", encoding="utf-8")
+    return env_dir
 
 
 def _normalize_agent_result(result: Any) -> tuple[str, int]:
@@ -109,62 +156,70 @@ def _normalize_agent_result(result: Any) -> tuple[str, int]:
 
 
 def _run_sample(
-    agent_fn: Callable[[str], Any],
+    agent_fn: Callable,
     case: Case,
     storage: Storage,
     tracer,
     run_id: str,
     sample_idx: int,
+    accepts_env: bool = False,
 ) -> SampleReport:
-    t0 = time.perf_counter()
-    with tracer.start_as_current_span(f"case.{case.id}") as span:
-        span.set_attribute("case.id", case.id)
-        span.set_attribute("case.sample_idx", sample_idx)
-        output, turns = _normalize_agent_result(agent_fn(case.input))
-        span.set_attribute("case.output", output)
-        trace_id = f"{span.get_span_context().trace_id:032x}"
-    duration_ms = (time.perf_counter() - t0) * 1000
+    env_dir = _prepare_env(case)
+    try:
+        t0 = time.perf_counter()
+        with tracer.start_as_current_span(f"case.{case.id}") as span:
+            span.set_attribute("case.id", case.id)
+            span.set_attribute("case.sample_idx", sample_idx)
+            result = agent_fn(case.input, env_dir) if accepts_env else agent_fn(case.input)
+            output, turns = _normalize_agent_result(result)
+            span.set_attribute("case.output", output)
+            trace_id = f"{span.get_span_context().trace_id:032x}"
+        duration_ms = (time.perf_counter() - t0) * 1000
 
-    # root span ended -> all spans of this trace are exported to storage
-    spans = storage.get_spans(trace_id)
-    cost_usd = sum(float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans)
+        # root span ended -> all spans of this trace are exported to storage
+        spans = storage.get_spans(trace_id)
+        cost_usd = sum(float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans)
 
-    ctx = CaseContext(
-        case_id=case.id,
-        input=case.input,
-        output=output,
-        turns=turns,
-        spans=spans,
-        cost_usd=cost_usd,
-        duration_ms=duration_ms,
-    )
-    results = [a.check(ctx) for a in case.assertions]
-    passed = all(r.passed for r in results)
+        ctx = CaseContext(
+            case_id=case.id,
+            input=case.input,
+            output=output,
+            turns=turns,
+            spans=spans,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            env_dir=env_dir,
+        )
+        results = [a.check(ctx) for a in case.assertions]
+        passed = all(r.passed for r in results)
 
-    storage.record_case_result(
-        run_id=run_id,
-        case_id=case.id,
-        sample_idx=sample_idx,
-        passed=passed,
-        output=output,
-        assertions=[{"name": r.name, "passed": r.passed, "detail": r.detail} for r in results],
-        trace_id=trace_id,
-        duration_ms=duration_ms,
-        cost_usd=cost_usd,
-    )
-    return SampleReport(
-        sample_idx=sample_idx,
-        passed=passed,
-        output=output,
-        results=results,
-        trace_id=trace_id,
-        duration_ms=duration_ms,
-        cost_usd=cost_usd,
-    )
+        storage.record_case_result(
+            run_id=run_id,
+            case_id=case.id,
+            sample_idx=sample_idx,
+            passed=passed,
+            output=output,
+            assertions=[{"name": r.name, "passed": r.passed, "detail": r.detail} for r in results],
+            trace_id=trace_id,
+            duration_ms=duration_ms,
+            cost_usd=cost_usd,
+        )
+        return SampleReport(
+            sample_idx=sample_idx,
+            passed=passed,
+            output=output,
+            results=results,
+            trace_id=trace_id,
+            duration_ms=duration_ms,
+            cost_usd=cost_usd,
+        )
+    finally:
+        if env_dir is not None:
+            shutil.rmtree(env_dir, ignore_errors=True)
 
 
 def run_cases(
-    agent_fn: Callable[[str], Any],
+    agent_fn: Callable,
     cases: list[Case],
     storage: Storage,
     tracer,
@@ -173,6 +228,12 @@ def run_cases(
 ) -> RunSummary:
     if samples < 1:
         raise ValueError("samples must be >= 1")
+    accepts_env = _accepts_env(agent_fn)
+    if not accepts_env and any(c.env for c in cases):
+        raise TypeError(
+            "cases declare an env fixture but the agent callable takes only one argument; "
+            "coding agents must accept (task: str, env_dir: str)"
+        )
     run_id = run_id or uuid.uuid4().hex[:8]
     reports: list[CaseReport] = []
 
@@ -180,7 +241,7 @@ def run_cases(
         report = CaseReport(case=case)
         for sample_idx in range(samples):
             report.samples.append(
-                _run_sample(agent_fn, case, storage, tracer, run_id, sample_idx)
+                _run_sample(agent_fn, case, storage, tracer, run_id, sample_idx, accepts_env)
             )
         reports.append(report)
 

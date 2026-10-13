@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import signal
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -16,6 +19,8 @@ class CaseContext:
     spans: list[dict[str, Any]] = field(default_factory=list)
     cost_usd: float = 0.0
     duration_ms: float = 0.0
+    # Scratch copy of the case's fixture env (see Case.env); None for text-only cases.
+    env_dir: str | None = None
 
 
 @dataclass
@@ -109,6 +114,90 @@ class MaxLatencyMs:
         )
 
 
+class CommandExit:
+    """Run a shell command inside the case env copy and assert on its exit code.
+
+    Spec: {cmd: "python check.py", expect: 0, timeout: 60}. `expect` defaults to 0.
+    `{env}` inside cmd expands to the env copy path. Requires the case to have an env.
+    """
+
+    def __init__(self, spec: dict[str, Any]):
+        if not isinstance(spec, dict) or not spec.get("cmd"):
+            raise ValueError(f"command_exit expects {{cmd: ..., expect?: int}}, got: {spec!r}")
+        self.cmd = str(spec["cmd"])
+        self.expect = int(spec.get("expect", 0))
+        self.timeout = float(spec.get("timeout", 60))
+        self.name = f"command_exit({self.cmd!r}, expect={self.expect})"
+
+    def _run(self, cmd: str, cwd: str) -> subprocess.CompletedProcess:
+        """Popen-based run so a timeout kills the whole process tree — with
+        shell=True, killing only the shell would orphan the real command."""
+        kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            cmd, shell=True, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True
+                )
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+    def check(self, ctx: CaseContext) -> AssertionResult:
+        if ctx.env_dir is None:
+            return AssertionResult(self.name, False, "case has no env; command_exit requires one")
+        cmd = self.cmd.replace("{env}", ctx.env_dir)
+        try:
+            proc = self._run(cmd, ctx.env_dir)
+        except subprocess.TimeoutExpired:
+            return AssertionResult(self.name, False, f"command timed out after {self.timeout}s")
+        if proc.returncode == self.expect:
+            return AssertionResult(self.name, True)
+        tail = (proc.stdout + proc.stderr).strip()[-200:]
+        return AssertionResult(
+            self.name, False, f"exit {proc.returncode} != {self.expect}; output tail: {tail!r}"
+        )
+
+
+class FileDiffMaxFiles:
+    """Limit how many files the agent may change inside the env copy.
+
+    The runner git-initializes every env copy, so this diffs against the
+    pristine fixture state (modified + untracked files both count).
+    """
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.name = f"file_diff_max_files({self.limit})"
+
+    def check(self, ctx: CaseContext) -> AssertionResult:
+        if ctx.env_dir is None:
+            return AssertionResult(self.name, False, "case has no env; file_diff_max_files requires one")
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ctx.env_dir,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return AssertionResult(self.name, False, f"env is not a git repo: {proc.stderr.strip()}")
+        changed = [line for line in proc.stdout.splitlines() if line.strip()]
+        passed = len(changed) <= self.limit
+        detail = "" if passed else f"{len(changed)} files changed > {self.limit}: {changed[:5]}"
+        return AssertionResult(self.name, passed, detail)
+
+
 _REGISTRY = {
     "output_contains": OutputContains,
     "output_not_contains": OutputNotContains,
@@ -117,6 +206,8 @@ _REGISTRY = {
     "max_turns": MaxTurns,
     "max_cost_usd": MaxCostUsd,
     "max_latency_ms": MaxLatencyMs,
+    "command_exit": CommandExit,
+    "file_diff_max_files": FileDiffMaxFiles,
 }
 
 
