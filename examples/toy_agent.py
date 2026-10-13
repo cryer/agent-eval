@@ -3,6 +3,9 @@ without needing an API key. It shows the instrumentation contract:
 - one LLM span with prompt.version and token usage
 - tool spans with tool.name
 Replace `agent` with a real model call in later phases.
+
+Note: the deterministic branching here intentionally mirrors what a
+policy-following support agent should do, so the demo cases stay stable.
 """
 
 from opentelemetry import trace
