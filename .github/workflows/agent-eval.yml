@@ -24,20 +24,22 @@ jobs:
           git worktree add ../baseline origin/${{ github.base_ref }}
           python -m pip install -q -e ../baseline
           cd ../baseline
+          # || true: failing cases are measurement data, not a job failure;
+          # only the compare step below is the gate
           python -m agent_eval.cli run \
             --cases examples/cases.yaml \
             --agent examples.toy_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id baseline \
-            --db "$GITHUB_WORKSPACE/eval.db"
+            --db "$GITHUB_WORKSPACE/eval.db" || true
           python -m agent_eval.cli simulate \
             --scenarios examples/scenarios.yaml \
             --agent examples.toy_chat_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id baseline \
-            --db "$GITHUB_WORKSPACE/eval.db"
+            --db "$GITHUB_WORKSPACE/eval.db" || true
 
       - name: Run candidate (this PR)
         run: |
@@ -48,19 +50,20 @@ jobs:
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
-            --db eval.db
+            --db eval.db || true
           python -m agent_eval.cli simulate \
             --scenarios examples/scenarios.yaml \
             --agent examples.toy_chat_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
-            --db eval.db
+            --db eval.db || true
 
       - name: Trace diff report
         if: always()
         run: python -m agent_eval.cli diff baseline candidate --db eval.db
 
       - name: Regression gate
+        if: always()
         run: python -m agent_eval.cli compare baseline candidate --db eval.db
         # exit 2 = significant regression -> job fails -> PR blocked
