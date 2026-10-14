@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -225,9 +226,12 @@ def run_cases(
     tracer,
     run_id: str | None = None,
     samples: int = 1,
+    concurrency: int = 1,
 ) -> RunSummary:
     if samples < 1:
         raise ValueError("samples must be >= 1")
+    if concurrency < 1:
+        raise ValueError("concurrency must be >= 1")
     accepts_env = _accepts_env(agent_fn)
     if not accepts_env and any(c.env for c in cases):
         raise TypeError(
@@ -235,14 +239,39 @@ def run_cases(
             "coding agents must accept (task: str, env_dir: str)"
         )
     run_id = run_id or uuid.uuid4().hex[:8]
-    reports: list[CaseReport] = []
+    reports = [CaseReport(case=c) for c in cases]
 
-    for case in cases:
-        report = CaseReport(case=case)
-        for sample_idx in range(samples):
-            report.samples.append(
-                _run_sample(agent_fn, case, storage, tracer, run_id, sample_idx, accepts_env)
+    tasks = [(case_idx, sample_idx) for case_idx in range(len(cases)) for sample_idx in range(samples)]
+    if concurrency == 1:
+        for case_idx, sample_idx in tasks:
+            reports[case_idx].samples.append(
+                _run_sample(
+                    agent_fn, cases[case_idx], storage, tracer, run_id, sample_idx, accepts_env
+                )
             )
-        reports.append(report)
+    else:
+        # IO-bound workload (LLM calls) -> threads are enough. Storage and the
+        # OTel exporter are lock-guarded; span context is per-thread, so each
+        # worker gets its own trace root.
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(
+                    _run_sample,
+                    agent_fn,
+                    cases[case_idx],
+                    storage,
+                    tracer,
+                    run_id,
+                    sample_idx,
+                    accepts_env,
+                ): (case_idx, sample_idx)
+                for case_idx, sample_idx in tasks
+            }
+            for fut in as_completed(futures):
+                case_idx, _ = futures[fut]
+                reports[case_idx].samples.append(fut.result())
+        # as_completed order is nondeterministic; reports must follow case/sample order
+        for report in reports:
+            report.samples.sort(key=lambda s: s.sample_idx)
 
     return RunSummary(run_id=run_id, reports=reports, samples_per_case=samples)

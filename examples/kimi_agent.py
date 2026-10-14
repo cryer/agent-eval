@@ -23,6 +23,7 @@ import os
 
 from opentelemetry import trace
 
+from agent_eval.retry import call_with_retries
 from agent_eval.tracing import prompt_version, set_token_usage
 
 tracer = trace.get_tracer("kimi-agent")
@@ -86,12 +87,9 @@ def _completion(messages: list[dict]):
             model = f"openai/{model}"
         kwargs["api_base"] = api_base
         kwargs["api_key"] = os.environ.get("KIMI_API_KEY")
-    return completion(
-        model=model,
-        messages=messages,
-        tools=TOOLS,
-        timeout=180,
-        **kwargs,
+    # the plan may cap concurrency — retry 429/5xx with backoff instead of failing
+    return call_with_retries(
+        lambda: completion(model=model, messages=messages, tools=TOOLS, timeout=180, **kwargs)
     )
 
 

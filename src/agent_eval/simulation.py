@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -189,6 +190,63 @@ def rollout(
     return history, ended, trace_id, duration_ms
 
 
+def _run_scenario_sample(
+    agent_fn: Callable[[list[dict]], Any],
+    scenario: Scenario,
+    pseudo_case: Case,
+    storage: Storage,
+    tracer,
+    user_backend,
+    run_id: str,
+    sample_idx: int,
+) -> SampleReport:
+    user = SimulatedUser(scenario.persona, backend=user_backend)
+    history, ended, trace_id, duration_ms = rollout(
+        agent_fn, user, scenario, tracer, sample_idx
+    )
+    transcript = format_transcript(history)
+    turns = sum(1 for m in history if m["role"] == "user")
+
+    spans = storage.get_spans(trace_id)
+    cost_usd = sum(
+        float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans
+    )
+    ctx = CaseContext(
+        case_id=scenario.id,
+        input=pseudo_case.input,
+        output=transcript,
+        turns=turns,
+        spans=spans,
+        cost_usd=cost_usd,
+        duration_ms=duration_ms,
+    )
+    results = [a.check(ctx) for a in scenario.assertions]
+    passed = all(r.passed for r in results)
+
+    storage.record_case_result(
+        run_id=run_id,
+        case_id=scenario.id,
+        sample_idx=sample_idx,
+        passed=passed,
+        output=transcript,
+        assertions=[
+            {"name": r.name, "passed": r.passed, "detail": r.detail} for r in results
+        ],
+        trace_id=trace_id,
+        duration_ms=duration_ms,
+        cost_usd=cost_usd,
+    )
+    return SampleReport(
+        sample_idx=sample_idx,
+        passed=passed,
+        output=transcript,
+        results=results,
+        trace_id=trace_id,
+        duration_ms=duration_ms,
+        cost_usd=cost_usd,
+    )
+
+
 def run_scenarios(
     agent_fn: Callable[[list[dict]], Any],
     scenarios: list[Scenario],
@@ -197,69 +255,61 @@ def run_scenarios(
     user_backend=None,
     run_id: str | None = None,
     samples: int = 1,
+    concurrency: int = 1,
 ) -> RunSummary:
     """Run scenarios and store results in case_results — so compare, diff and
     the CI gate work on multi-turn simulations exactly as on static cases."""
     if samples < 1:
         raise ValueError("samples must be >= 1")
+    if concurrency < 1:
+        raise ValueError("concurrency must be >= 1")
     run_id = run_id or uuid.uuid4().hex[:8]
-    reports: list[CaseReport] = []
-
-    for scenario in scenarios:
-        pseudo_case = Case(
-            id=scenario.id,
-            input=f"[scenario: {scenario.persona.style}] {scenario.persona.hidden_goal}",
-            assertions=scenario.assertions,
+    pseudo_cases = [
+        Case(
+            id=s.id,
+            input=f"[scenario: {s.persona.style}] {s.persona.hidden_goal}",
+            assertions=s.assertions,
         )
-        report = CaseReport(case=pseudo_case)
-        for sample_idx in range(samples):
-            user = SimulatedUser(scenario.persona, backend=user_backend)
-            history, ended, trace_id, duration_ms = rollout(
-                agent_fn, user, scenario, tracer, sample_idx
-            )
-            transcript = format_transcript(history)
-            turns = sum(1 for m in history if m["role"] == "user")
+        for s in scenarios
+    ]
+    reports = [CaseReport(case=pc) for pc in pseudo_cases]
 
-            spans = storage.get_spans(trace_id)
-            cost_usd = sum(
-                float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans
-            )
-            ctx = CaseContext(
-                case_id=scenario.id,
-                input=pseudo_case.input,
-                output=transcript,
-                turns=turns,
-                spans=spans,
-                cost_usd=cost_usd,
-                duration_ms=duration_ms,
-            )
-            results = [a.check(ctx) for a in scenario.assertions]
-            passed = all(r.passed for r in results)
-
-            storage.record_case_result(
-                run_id=run_id,
-                case_id=scenario.id,
-                sample_idx=sample_idx,
-                passed=passed,
-                output=transcript,
-                assertions=[
-                    {"name": r.name, "passed": r.passed, "detail": r.detail} for r in results
-                ],
-                trace_id=trace_id,
-                duration_ms=duration_ms,
-                cost_usd=cost_usd,
-            )
-            report.samples.append(
-                SampleReport(
-                    sample_idx=sample_idx,
-                    passed=passed,
-                    output=transcript,
-                    results=results,
-                    trace_id=trace_id,
-                    duration_ms=duration_ms,
-                    cost_usd=cost_usd,
+    tasks = [(si, ki) for si in range(len(scenarios)) for ki in range(samples)]
+    if concurrency == 1:
+        for scenario_idx, sample_idx in tasks:
+            reports[scenario_idx].samples.append(
+                _run_scenario_sample(
+                    agent_fn,
+                    scenarios[scenario_idx],
+                    pseudo_cases[scenario_idx],
+                    storage,
+                    tracer,
+                    user_backend,
+                    run_id,
+                    sample_idx,
                 )
             )
-        reports.append(report)
+    else:
+        # same threading model as run_cases: IO-bound, lock-guarded storage,
+        # per-thread span context
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(
+                    _run_scenario_sample,
+                    agent_fn,
+                    scenarios[scenario_idx],
+                    pseudo_cases[scenario_idx],
+                    storage,
+                    tracer,
+                    user_backend,
+                    run_id,
+                    sample_idx,
+                ): scenario_idx
+                for scenario_idx, sample_idx in tasks
+            }
+            for fut in as_completed(futures):
+                reports[futures[fut]].samples.append(fut.result())
+        for report in reports:
+            report.samples.sort(key=lambda s: s.sample_idx)
 
     return RunSummary(run_id=run_id, reports=reports, samples_per_case=samples)

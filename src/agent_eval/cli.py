@@ -111,7 +111,13 @@ def _cmd_run(args) -> int:
         if args.run_id:
             storage.delete_run_results(args.run_id, case_ids=[c.id for c in cases])
         summary = run_cases(
-            agent_fn, cases, storage, tracer, run_id=args.run_id, samples=args.samples
+            agent_fn,
+            cases,
+            storage,
+            tracer,
+            run_id=args.run_id,
+            samples=args.samples,
+            concurrency=args.concurrency,
         )
         existing = storage.get_run(summary.run_id)
         total, passed = storage.run_totals(summary.run_id)
@@ -148,6 +154,7 @@ def _cmd_simulate(args) -> int:
             user_backend=user_backend,
             run_id=args.run_id,
             samples=args.samples,
+            concurrency=args.concurrency,
         )
         existing = storage.get_run(summary.run_id)
         total, passed = storage.run_totals(summary.run_id)
@@ -334,6 +341,13 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--db", default="eval.db", help="SQLite trace DB path")
     run_p.add_argument("--samples", type=int, default=1, help="samples per case (pass^k)")
     run_p.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="parallel workers; bound it to your model plan's rate limit"
+        " (429s are retried with backoff, but fewer workers = less throttling)",
+    )
+    run_p.add_argument(
         "--run-id",
         default=None,
         help="pin the run id (e.g. baseline/candidate in CI); re-running replaces old results",
@@ -348,6 +362,13 @@ def main(argv: list[str] | None = None) -> int:
     sim_p.add_argument("--agent", required=True, help="agent callable as module:attr; takes message history")
     sim_p.add_argument("--db", default="eval.db")
     sim_p.add_argument("--samples", type=int, default=1, help="rollouts per scenario (pass^k)")
+    sim_p.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="parallel workers; bound it to your model plan's rate limit"
+        " (429s are retried with backoff, but fewer workers = less throttling)",
+    )
     sim_p.add_argument("--run-id", default=None)
     sim_p.add_argument(
         "--user-backend",

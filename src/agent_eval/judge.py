@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .assertions import AssertionResult, CaseContext
+from .retry import call_with_retries
 
 JUDGE_PROMPT_TEMPLATE = """\
 You are an impartial evaluator for an LLM agent. Decide whether the agent's
@@ -66,12 +67,16 @@ class LiteLLMBackend:
                 model = f"openai/{model}"
             kwargs["api_base"] = self.api_base
             kwargs["api_key"] = self.api_key
-        resp = completion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=180,
-            **kwargs,
-        )
+        def _call():
+            return completion(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=180,
+                **kwargs,
+            )
+
+        # rate limits are expected under parallel workers — back off, don't fail
+        resp = call_with_retries(_call)
         return resp.choices[0].message.content
 
 
