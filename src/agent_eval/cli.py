@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .calibration import load_golden, run_calibration, store_calibration
 from .diff import diff_runs
+from .distill import distill_cases, parse_since, render_cases_yaml
 from .judge import Judge, build_backend
 from .runner import load_cases, run_cases
 from .simulation import load_scenarios, run_scenarios
@@ -286,6 +287,31 @@ def _cmd_diff(args) -> int:
         storage.close()
 
 
+def _cmd_distill(args) -> int:
+    storage = Storage(args.db)
+    try:
+        since_ns = parse_since(args.since) if args.since else None
+        cases, scanned = distill_cases(
+            storage,
+            since_ns=since_ns,
+            limit=args.limit,
+            prompt_version=args.prompt_version,
+        )
+        if not cases:
+            print(f"no distillable traces found (scanned {scanned} case traces)")
+            return 1
+        Path(args.out).write_text(render_cases_yaml(cases), encoding="utf-8")
+        print(f"distilled {len(cases)} cases from {scanned} case traces -> {args.out}\n")
+        for c in cases:
+            tools = ", ".join(c.tools) if c.tools else "(no tool calls)"
+            preview = c.input.replace("\n", " ")[:50]
+            print(f"  {c.id}  tools: {tools}  input: {preview}")
+        print("\ntool_called assertions are derived; add semantic assertions before gating.")
+        return 0
+    finally:
+        storage.close()
+
+
 def _cmd_history(args) -> int:
     storage = Storage(args.db)
     try:
@@ -402,6 +428,22 @@ def main(argv: list[str] | None = None) -> int:
     hist_p = sub.add_parser("history", help="list recorded runs")
     hist_p.add_argument("--db", default="eval.db")
     hist_p.set_defaults(func=_cmd_history)
+
+    dist_p = sub.add_parser("distill", help="distill recorded traces into new regression cases")
+    dist_p.add_argument("--out", default="cases_distilled.yaml", help="output cases YAML path")
+    dist_p.add_argument("--db", default="eval.db")
+    dist_p.add_argument("--limit", type=int, default=50, help="max cases to distill")
+    dist_p.add_argument(
+        "--since",
+        default=None,
+        help="only traces at/after this ISO date/datetime (UTC if naive)",
+    )
+    dist_p.add_argument(
+        "--prompt-version",
+        default=None,
+        help="only traces containing this prompt.version hash",
+    )
+    dist_p.set_defaults(func=_cmd_distill)
 
     trace_p = sub.add_parser("trace", help="dump spans of one trace")
     trace_p.add_argument("trace_id")

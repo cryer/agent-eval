@@ -60,6 +60,9 @@ python -m agent_eval.cli run --cases examples/cases_coding.yaml \
 # 门禁：统计对比两次运行
 python -m agent_eval.cli compare baseline candidate    # 退出码 2 = 显著回归
 python -m agent_eval.cli diff baseline candidate       # 轨迹 diff
+
+# case 供给：从历史 trace 蒸馏新 case（tool 调用序列派生 tool_called 断言）
+python -m agent_eval.cli distill --out cases_distilled.yaml --limit 50
 ```
 
 接入真实模型（任何 LiteLLM 支持的 provider；Kimi K3 示例）：
@@ -92,9 +95,9 @@ run id。`diff` 永远输出轨迹对比报告；`compare` 发现显著回归时
 
 ```
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
-                  stats · simulation · diff · runner · cli
+                  stats · simulation · diff · distill · runner · cli
 examples/         toy + 真实（Kimi K3）agent、case、场景、金标集
-tests/            217 个离线 pytest 测试
+tests/            234 个离线 pytest 测试
 ```
 
 ## 许可证

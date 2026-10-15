@@ -68,6 +68,10 @@ python -m agent_eval.cli run --cases examples/cases_coding.yaml \
 # the gate: statistically compare two runs
 python -m agent_eval.cli compare baseline candidate    # exit 2 = significant regression
 python -m agent_eval.cli diff baseline candidate       # trajectory diff
+
+# case supply: distill new cases from recorded traces (tool_called derived
+# from the observed tool-call sequence)
+python -m agent_eval.cli distill --out cases_distilled.yaml --limit 50
 ```
 
 Plug in a real model (any LiteLLM-supported provider; Kimi K3 example):
@@ -102,9 +106,9 @@ significant regression and blocks the merge. The examples run fully offline
 
 ```
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
-                  stats · simulation · diff · runner · cli
+                  stats · simulation · diff · distill · runner · cli
 examples/         toy + real (Kimi K3) agents, cases, scenarios, golden set
-tests/            217 offline pytest tests
+tests/            234 offline pytest tests
 ```
 
 ## License

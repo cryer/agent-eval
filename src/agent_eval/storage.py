@@ -122,6 +122,32 @@ class Storage:
             for r in rows
         ]
 
+    def list_trace_roots(self, since_ns: int | None = None) -> list[dict[str, Any]]:
+        """Root spans (no parent), newest first — one per recorded trace.
+
+        `since_ns` filters on start_time (OTel epoch nanoseconds)."""
+        sql = "SELECT * FROM spans WHERE parent_span_id IS NULL"
+        params: list[Any] = []
+        if since_ns is not None:
+            sql += " AND start_time >= ?"
+            params.append(since_ns)
+        sql += " ORDER BY start_time DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "trace_id": r["trace_id"],
+                "span_id": r["span_id"],
+                "parent_span_id": r["parent_span_id"],
+                "name": r["name"],
+                "start_time": r["start_time"],
+                "end_time": r["end_time"],
+                "attributes": json.loads(r["attributes"]),
+                "status": r["status"],
+            }
+            for r in rows
+        ]
+
     # ---- runs / results ----
 
     def record_run(self, run_id: str, agent: str, cases_path: str, total: int, passed: int) -> None:

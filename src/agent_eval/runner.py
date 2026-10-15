@@ -171,6 +171,7 @@ def _run_sample(
         with tracer.start_as_current_span(f"case.{case.id}") as span:
             span.set_attribute("case.id", case.id)
             span.set_attribute("case.sample_idx", sample_idx)
+            span.set_attribute("case.input", case.input)
             result = agent_fn(case.input, env_dir) if accepts_env else agent_fn(case.input)
             output, turns = _normalize_agent_result(result)
             span.set_attribute("case.output", output)
