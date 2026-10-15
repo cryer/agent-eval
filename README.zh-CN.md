@@ -1,7 +1,7 @@
 # agent-eval
 
-**给 LLM agent 用的 CI**——每次改 prompt 都自动重放评测集，用统计检验判断
-这次改动是真回归还是随机噪声。
+**给 LLM agent 用的 CI**——改 prompt、换模型、动工具、重构循环：任何改动
+都自动重放评测集，用统计检验判断是真回归还是随机噪声。
 
 [English](README.md) | 中文
 
@@ -9,12 +9,14 @@
 
 ## 为什么需要它
 
-系统提示词改一行，agent 可能悄悄就坏了。单元测试帮不上忙：agent 的行为是
-概率性的、多轮的、靠工具驱动的。`agent-eval` 把"这次 prompt 改动有没有让
-效果变差"变成一道有统计依据的 CI 门禁，给出明确的拦/放答案。
+agent 会悄悄变坏——而且不只是改 prompt 的时候。换个模型版本、改一下工具
+schema、重构 agent 循环代码，同样可能让行为漂移。单元测试帮不上忙：agent
+的行为是概率性的、多轮的、靠工具驱动的。`agent-eval` 把"这次改动有没有让
+效果变差"变成一道有统计依据的 CI 门禁——不管改动来自哪一层，都给出明确的
+拦/放答案。
 
 ```
-prompt 改动 → 重放评测集（baseline vs candidate）→ McNemar + bootstrap → 合并或拦截
+任何 agent 改动 → 重放评测集（baseline vs candidate）→ McNemar + bootstrap → 合并或拦截
 ```
 
 ## 功能

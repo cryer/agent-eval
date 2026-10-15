@@ -1,7 +1,8 @@
 # agent-eval
 
-**CI for LLM agents** — replay your eval suite on every prompt change, and let
-statistics decide whether the change is a regression or just noise.
+**CI for LLM agents** — change the prompt, swap the model, edit a tool,
+refactor the loop: replay the eval suite and let statistics decide whether
+anything got worse, or whether it's just noise.
 
 English | [中文](README.zh-CN.md)
 
@@ -9,13 +10,15 @@ English | [中文](README.zh-CN.md)
 
 ## Why
 
-Changing one line of a system prompt can silently break your agent. Unit tests
-don't help: agent behavior is probabilistic, multi-turn, and tool-driven.
-`agent-eval` turns "does this prompt change make things worse?" into a
-CI gate with a yes/no answer backed by statistical tests.
+Agents break silently, and not just when you touch the prompt — swapping a
+model version, editing a tool schema, or refactoring the agent loop can shift
+behavior just as much. Unit tests don't help: agent behavior is probabilistic,
+multi-turn, and tool-driven. `agent-eval` turns "did this change make things
+worse?" into a CI gate with a yes/no answer backed by statistical tests —
+whatever layer the change came from.
 
 ```
-prompt diff → run eval suite (baseline vs candidate) → McNemar + bootstrap → merge or block
+any agent change → run eval suite (baseline vs candidate) → McNemar + bootstrap → merge or block
 ```
 
 ## Features
