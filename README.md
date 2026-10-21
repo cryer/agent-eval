@@ -82,6 +82,10 @@ export KIMI_API_BASE=https://api.kimi.com/coding/v1
 python -m agent_eval.cli run --cases examples/cases.yaml \
     --agent examples.kimi_agent:agent --judge-backend litellm --judge-model k3 \
     --samples 2 --concurrency 3
+
+# real K3 coding agent: function-calling loop with sandboxed file/shell tools
+python -m agent_eval.cli run --cases examples/cases_coding.yaml \
+    --agent examples.kimi_coding_agent:agent
 ```
 
 ## Your agent's contract
@@ -108,7 +112,7 @@ significant regression and blocks the merge. The examples run fully offline
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
                   stats · simulation · diff · distill · runner · cli
 examples/         toy + real (Kimi K3) agents, cases, scenarios, golden set
-tests/            234 offline pytest tests
+tests/            249 offline pytest tests
 ```
 
 ## License

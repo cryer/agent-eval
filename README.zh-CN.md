@@ -73,6 +73,10 @@ export KIMI_API_BASE=https://api.kimi.com/coding/v1
 python -m agent_eval.cli run --cases examples/cases.yaml \
     --agent examples.kimi_agent:agent --judge-backend litellm --judge-model k3 \
     --samples 2 --concurrency 3
+
+# 真实 K3 coding agent：function-calling 循环 + 沙箱化文件/shell 工具
+python -m agent_eval.cli run --cases examples/cases_coding.yaml \
+    --agent examples.kimi_coding_agent:agent
 ```
 
 ## 你的 agent 要满足的契约
@@ -97,7 +101,7 @@ run id。`diff` 永远输出轨迹对比报告；`compare` 发现显著回归时
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
                   stats · simulation · diff · distill · runner · cli
 examples/         toy + 真实（Kimi K3）agent、case、场景、金标集
-tests/            234 个离线 pytest 测试
+tests/            249 个离线 pytest 测试
 ```
 
 ## 许可证
