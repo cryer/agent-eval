@@ -149,6 +149,42 @@ class TestRunCases:
         )
         assert missing.ok is False
 
+    def test_agent_error_does_not_stop_later_cases(self, storage, tracer):
+        def agent(user_input):
+            if user_input == "bad":
+                raise ValueError("broken agent")
+            return "yes"
+
+        cases = [
+            Case(id="bad", input="bad", assertions=[]),
+            Case(id="good", input="good", assertions=[OutputContains("yes")]),
+        ]
+        summary = run_cases(agent, cases, storage, tracer, run_id="errors")
+        assert summary.error_count == 1
+        assert summary.reports[0].samples[0].status == "error"
+        assert summary.reports[1].passed
+        rows = storage.get_run_results("errors")
+        assert rows[0]["status"] == "error"
+        assert rows[0]["error"] == "ValueError: broken agent"
+        assert storage.get_spans(rows[0]["trace_id"])
+
+    def test_assertion_exception_is_an_execution_error(self, storage, tracer):
+        class BrokenAssertion:
+            def check(self, ctx):
+                raise RuntimeError("judge unavailable")
+
+        summary = run_cases(
+            lambda _: "yes",
+            [_case("c1", BrokenAssertion())],
+            storage,
+            tracer,
+            run_id="assertion-error",
+        )
+        sample = summary.reports[0].samples[0]
+        assert sample.status == "error"
+        assert sample.error == "RuntimeError: judge unavailable"
+        assert storage.get_run_results("assertion-error")[0]["status"] == "error"
+
     def test_samples_below_one_raises(self, storage, tracer):
         with pytest.raises(ValueError, match="samples must be >= 1"):
             run_cases(lambda _: "x", [_case("c1")], storage, tracer, samples=0)

@@ -39,13 +39,36 @@ CREATE TABLE IF NOT EXISTS case_results (
     trace_id    TEXT NOT NULL,
     duration_ms REAL NOT NULL,
     cost_usd    REAL NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'completed',
+    error       TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_executions (
+    execution_id TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL,
+    source_key   TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    source_path  TEXT NOT NULL,
+    source_hash  TEXT NOT NULL,
+    case_ids     TEXT NOT NULL,
+    samples      INTEGER NOT NULL,
+    agent        TEXT NOT NULL,
+    metadata     TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    UNIQUE (run_id, source_key)
 );
 
 CREATE TABLE IF NOT EXISTS calibrations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     judge       TEXT NOT NULL,
     golden_path TEXT NOT NULL,
+    golden_hash TEXT NOT NULL DEFAULT '',
+    judge_config TEXT NOT NULL DEFAULT '{}',
+    admission   TEXT NOT NULL DEFAULT '{}',
     metrics     TEXT NOT NULL,
     details     TEXT NOT NULL,
     created_at  TEXT NOT NULL
@@ -68,13 +91,27 @@ class Storage:
             self._migrate()
 
     def _migrate(self) -> None:
-        # sample_idx was added after the first schema version
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(case_results)")}
-        if "sample_idx" not in cols:
-            self._conn.execute(
-                "ALTER TABLE case_results ADD COLUMN sample_idx INTEGER NOT NULL DEFAULT 0"
-            )
-            self._conn.commit()
+        additions = {
+            "sample_idx": "INTEGER NOT NULL DEFAULT 0",
+            "status": "TEXT NOT NULL DEFAULT 'completed'",
+            "error": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE case_results ADD COLUMN {name} {definition}")
+        calibration_cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(calibrations)")
+        }
+        calibration_additions = {
+            "golden_hash": "TEXT NOT NULL DEFAULT ''",
+            "judge_config": "TEXT NOT NULL DEFAULT '{}'",
+            "admission": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for name, definition in calibration_additions.items():
+            if name not in calibration_cols:
+                self._conn.execute(f"ALTER TABLE calibrations ADD COLUMN {name} {definition}")
+        self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -150,6 +187,67 @@ class Storage:
 
     # ---- runs / results ----
 
+    def begin_execution(self, manifest: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM run_executions WHERE run_id = ? AND source_key = ?",
+                (manifest["run_id"], manifest["source_key"]),
+            )
+            self._conn.execute(
+                "INSERT INTO run_executions"
+                " (execution_id, run_id, source_key, kind, source_path, source_hash,"
+                " case_ids, samples, agent, metadata, status, error, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', '', ?)",
+                (
+                    manifest["execution_id"],
+                    manifest["run_id"],
+                    manifest["source_key"],
+                    manifest["kind"],
+                    manifest["source_path"],
+                    manifest["source_hash"],
+                    json.dumps(manifest["case_ids"]),
+                    manifest["samples"],
+                    manifest["agent"],
+                    json.dumps(manifest, ensure_ascii=False),
+                    _now(),
+                ),
+            )
+            self._conn.commit()
+
+    def finish_execution(self, execution_id: str, status: str, error: str = "") -> None:
+        if status not in {"completed", "incomplete", "error"}:
+            raise ValueError(f"invalid execution status: {status}")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE run_executions SET status = ?, error = ?, finished_at = ?"
+                " WHERE execution_id = ?",
+                (status, error, _now(), execution_id),
+            )
+            self._conn.commit()
+
+    def update_execution_metadata(self, manifest: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE run_executions SET metadata = ? WHERE execution_id = ?",
+                (json.dumps(manifest, ensure_ascii=False), manifest["execution_id"]),
+            )
+            self._conn.commit()
+
+    def get_run_executions(self, run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM run_executions WHERE run_id = ? ORDER BY source_key",
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                **dict(r),
+                "case_ids": json.loads(r["case_ids"]),
+                "metadata": json.loads(r["metadata"]),
+            }
+            for r in rows
+        ]
+
     def record_run(self, run_id: str, agent: str, cases_path: str, total: int, passed: int) -> None:
         with self._lock:
             self._conn.execute(
@@ -169,13 +267,15 @@ class Storage:
         duration_ms: float,
         cost_usd: float,
         sample_idx: int = 0,
+        status: str = "completed",
+        error: str = "",
     ) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO case_results"
                 " (run_id, case_id, sample_idx, passed, output, assertions, trace_id,"
-                " duration_ms, cost_usd, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " duration_ms, cost_usd, status, error, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     case_id,
@@ -186,6 +286,8 @@ class Storage:
                     trace_id,
                     duration_ms,
                     cost_usd,
+                    status,
+                    error,
                     _now(),
                 ),
             )
@@ -250,14 +352,22 @@ class Storage:
         golden_path: str,
         metrics: dict[str, float],
         details: list[dict],
+        *,
+        golden_hash: str = "",
+        judge_config: dict | None = None,
+        admission: dict | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO calibrations (judge, golden_path, metrics, details, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO calibrations"
+                " (judge, golden_path, golden_hash, judge_config, admission,"
+                " metrics, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     judge,
                     golden_path,
+                    golden_hash,
+                    json.dumps(judge_config or {}),
+                    json.dumps(admission or {}),
                     json.dumps(metrics),
                     json.dumps(details, ensure_ascii=False),
                     _now(),
@@ -268,10 +378,20 @@ class Storage:
 
     def list_calibrations(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM calibrations ORDER BY created_at DESC"
-            ).fetchall()
+            rows = self._conn.execute("SELECT * FROM calibrations ORDER BY id DESC").fetchall()
         return [
-            {**dict(r), "metrics": json.loads(r["metrics"]), "details": json.loads(r["details"])}
+            {
+                **dict(r),
+                "judge_config": json.loads(r["judge_config"]),
+                "admission": json.loads(r["admission"]),
+                "metrics": json.loads(r["metrics"]),
+                "details": json.loads(r["details"]),
+            }
             for r in rows
         ]
+
+    def latest_calibration(self, judge_config: dict) -> dict[str, Any] | None:
+        return next(
+            (row for row in self.list_calibrations() if row["judge_config"] == judge_config),
+            None,
+        )

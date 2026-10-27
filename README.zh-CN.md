@@ -16,7 +16,7 @@ schema、重构 agent 循环代码，同样可能让行为漂移。单元测试�
 拦/放答案。
 
 ```
-任何 agent 改动 → 重放评测集（baseline vs candidate）→ McNemar + bootstrap → 合并或拦截
+任何 agent 改动 → 重放 baseline/candidate → 校准裁判 + 聚类 bootstrap 门禁 → 合并或拦截
 ```
 
 ## 功能
@@ -26,19 +26,25 @@ schema、重构 agent 循环代码，同样可能让行为漂移。单元测试�
   变了，而不只是*变了*。
 - **两层断言**：便宜的确定性规则断言（输出内容、工具调用、轮数/成本/延迟
   预算、工作区状态）+ LLM-as-judge 判语义质量。
-- **裁判校准**：裁判本身也要被评测——用人工标注的金标集给 judge 算
-  accuracy / Cohen's kappa / FPR / FNR，校准合格才配当门禁。
+- **裁判校准准入**：用人工金标集计算 accuracy / Cohen's kappa / FPR / FNR，
+  默认要求 50 条、每类至少 10 条、kappa ≥ 0.6、FPR ≤ 0.05；不合格退出码 4。
+  `compare --require-calibration` 强制检查相同 judge 配置的最新合格记录。
 - **带隐藏目标的模拟用户**：多轮对话仿真，含对抗人格（比如假装配合、
   实际在套系统提示词的用户）。规则断言兜底，模拟用户放水也漏不掉。
 - **coding agent 支持**：case 可以挂仓库快照 fixture，每个采样在独立副本里
   跑，断言检查工作区终态（`command_exit`、改动文件数上限）——SWE-bench 的
   FAIL_TO_PASS 模式。
-- **统计门禁**：pass^k 采样、McNemar 精确检验、paired bootstrap 置信区间。
-  拦的是*显著*回归，不是噪声。
+- **统计门禁**：多次采样按 case 聚类 bootstrap，不把 k 次采样当独立 case。
+  以最小重要回归阈值和置信区间判定放行、回归或证据不足；单采样 McNemar
+  只作辅助诊断，不再决定门禁。
+- **可信执行清单**：记录 Git、数据集、模型和 judge 配置；agent/judge 异常与
+  断言失败分开。`compare` 先拒绝不完整、采样数或数据集不一致的运行，避免假绿。
+- **CI 报告**：`run` / `simulate` 支持 JSON 与 JUnit XML，`compare` / `calibrate`
+  支持 JSON；workflow 上传报告、轨迹 diff 和 SQLite artifact。
 - **并发 + 限流容错**：`--concurrency N` 并行执行，429/5xx 自动指数退避
   重试——套餐限并发时表现为变慢，而不是评测失败。
 - **GitHub Actions 就绪**：内置 workflow 用目标分支跑 baseline、PR 跑
-  candidate，显著回归直接拦截合并（退出码 2）。
+  candidate，回归或证据不足都会拦截合并。
 
 ## 快速开始
 
@@ -57,9 +63,13 @@ python -m agent_eval.cli simulate --scenarios examples/scenarios.yaml \
 python -m agent_eval.cli run --cases examples/cases_coding.yaml \
     --agent examples.coding_agent:agent
 
-# 门禁：统计对比两次运行
-python -m agent_eval.cli compare baseline candidate    # 退出码 2 = 显著回归
+# 离线示例只有 12 个 case，显式放宽样本数；生产保持默认 --min-cases 50
+python -m agent_eval.cli compare baseline candidate --min-cases 12
 python -m agent_eval.cli diff baseline candidate       # 轨迹 diff
+
+# 生产裁判准入：真实金标集默认至少 50 条、每类至少 10 条
+python -m agent_eval.cli calibrate --golden golden_production.yaml \
+    --judge-backend litellm --judge-model k3 --json-out calibration.json
 
 # case 供给：从历史 trace 蒸馏新 case（tool 调用序列派生 tool_called 断言）
 python -m agent_eval.cli distill --out cases_distilled.yaml --limit 50
@@ -90,18 +100,32 @@ python -m agent_eval.cli run --cases examples/cases_coding.yaml \
 
 ## CI 门禁怎么工作
 
-`.github/workflows/agent-eval.yml`：每个 PR 触发后，用 git worktree 签出
-目标分支跑 `baseline`，PR 代码跑 `candidate`，两边共用同一个 SQLite 库的
-run id。`diff` 永远输出轨迹对比报告；`compare` 发现显著回归时以退出码 2
-拦截合并。示例完全离线（stub 裁判），CI 不需要配任何密钥。
+`.github/workflows/agent-eval.yml`：每个 PR 先跑 pytest，再用同一版评测器分别
+执行目标分支 worktree 中的 `baseline` agent 和 PR 中的 `candidate` agent。
+两边共用 SQLite run id。`compare` 在统计前检查执行清单、case 集合、数据集
+哈希、采样数、judge/模拟用户配置和样本状态。真实 judge 管线还应加
+`--require-calibration`；缺失或被拒绝的最新校准会返回 1。
+
+统计判定看平均通过率差 `B-A` 及其置信区间，`--min-delta` 默认 0.05：
+区间上界 `< -0.05` = 重要回归（2）；区间下界 `>= -0.05` = 没有重要回归（0）；
+跨过该边界 = 证据不足（3）。case 少于 `--min-cases`（默认 50）也为证据不足。
+**证据不足不等于发现回归，也不等于安全放行**：应优先补独立 case，再看变差的
+case 和轨迹；不要只为变绿而调大阈值或降低样本要求。
+
+`run` / `simulate` 退出码：0 = 全通过，1 = 有断言失败，3 = 有执行异常。
+`compare`：0 = 放行，1 = 无效，2 = 重要回归，3 = 证据不足；`calibrate`：
+0 = 准入，4 = 拒绝。JSON 报告包含完整判定依据；workflow 上传报告、diff 和
+eval.db（保留 14 天）。真实流量的 artifact 可能含敏感输入输出，上传前应先脱敏。
+旧版本产生、没有执行清单的 run 仍可查看，但需重跑后才能参与严格 `compare`。
 
 ## 目录结构
 
 ```
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
-                  stats · simulation · diff · distill · runner · cli
+                  stats · simulation · diff · distill · manifest · compare
+                  reporting · runner · cli
 examples/         toy + 真实（Kimi K3）agent、case、场景、金标集
-tests/            249 个离线 pytest 测试
+tests/            289 个离线 pytest 测试
 ```
 
 ## 许可证

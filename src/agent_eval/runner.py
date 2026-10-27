@@ -35,6 +35,8 @@ class SampleReport:
     trace_id: str
     duration_ms: float
     cost_usd: float
+    status: str = "completed"
+    error: str = ""
 
 
 @dataclass
@@ -78,7 +80,11 @@ class RunSummary:
 
     @property
     def ok(self) -> bool:
-        return self.passed == self.total
+        return self.error_count == 0 and self.passed == self.total
+
+    @property
+    def error_count(self) -> int:
+        return sum(s.status == "error" for r in self.reports for s in r.samples)
 
     @property
     def mean_pass_rate(self) -> float:
@@ -165,35 +171,49 @@ def _run_sample(
     sample_idx: int,
     accepts_env: bool = False,
 ) -> SampleReport:
-    env_dir = _prepare_env(case)
+    env_dir = None
+    output = ""
+    results: list[AssertionResult] = []
+    status = "completed"
+    error = ""
+    t0 = time.perf_counter()
     try:
-        t0 = time.perf_counter()
         with tracer.start_as_current_span(f"case.{case.id}") as span:
             span.set_attribute("case.id", case.id)
             span.set_attribute("case.sample_idx", sample_idx)
             span.set_attribute("case.input", case.input)
-            result = agent_fn(case.input, env_dir) if accepts_env else agent_fn(case.input)
-            output, turns = _normalize_agent_result(result)
-            span.set_attribute("case.output", output)
             trace_id = f"{span.get_span_context().trace_id:032x}"
+            try:
+                env_dir = _prepare_env(case)
+                result = agent_fn(case.input, env_dir) if accepts_env else agent_fn(case.input)
+                output, turns = _normalize_agent_result(result)
+                span.set_attribute("case.output", output)
+            except Exception as exc:
+                status = "error"
+                error = f"{type(exc).__name__}: {exc}"
+                span.set_attribute("case.error", error)
+                span.record_exception(exc)
         duration_ms = (time.perf_counter() - t0) * 1000
 
-        # root span ended -> all spans of this trace are exported to storage
         spans = storage.get_spans(trace_id)
         cost_usd = sum(float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans)
-
-        ctx = CaseContext(
-            case_id=case.id,
-            input=case.input,
-            output=output,
-            turns=turns,
-            spans=spans,
-            cost_usd=cost_usd,
-            duration_ms=duration_ms,
-            env_dir=env_dir,
-        )
-        results = [a.check(ctx) for a in case.assertions]
-        passed = all(r.passed for r in results)
+        if status == "completed":
+            ctx = CaseContext(
+                case_id=case.id,
+                input=case.input,
+                output=output,
+                turns=turns,
+                spans=spans,
+                cost_usd=cost_usd,
+                duration_ms=duration_ms,
+                env_dir=env_dir,
+            )
+            try:
+                results = [a.check(ctx) for a in case.assertions]
+            except Exception as exc:
+                status = "error"
+                error = f"{type(exc).__name__}: {exc}"
+        passed = status == "completed" and all(r.passed for r in results)
 
         storage.record_case_result(
             run_id=run_id,
@@ -205,6 +225,8 @@ def _run_sample(
             trace_id=trace_id,
             duration_ms=duration_ms,
             cost_usd=cost_usd,
+            status=status,
+            error=error,
         )
         return SampleReport(
             sample_idx=sample_idx,
@@ -214,6 +236,8 @@ def _run_sample(
             trace_id=trace_id,
             duration_ms=duration_ms,
             cost_usd=cost_usd,
+            status=status,
+            error=error,
         )
     finally:
         if env_dir is not None:

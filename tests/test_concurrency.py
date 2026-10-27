@@ -67,12 +67,27 @@ class TestParallelRunCases:
         )
         assert summary.ok
 
-    def test_worker_exception_propagates(self, storage, tracer):
-        def boom(_: str) -> str:
-            raise RuntimeError("agent crashed")
+    def test_worker_exception_is_isolated_and_persisted(self, storage, tracer):
+        def sometimes_boom(user_input: str) -> str:
+            if user_input == "input 0":
+                raise RuntimeError("agent crashed")
+            return user_input
 
-        with pytest.raises(RuntimeError, match="agent crashed"):
-            run_cases(boom, _make_cases(1), storage, tracer, run_id="x", concurrency=2)
+        summary = run_cases(
+            sometimes_boom,
+            _make_cases(2),
+            storage,
+            tracer,
+            run_id="x",
+            samples=2,
+            concurrency=2,
+        )
+        assert summary.error_count == 2
+        assert summary.reports[1].passed
+        rows = storage.get_run_results("x")
+        assert len(rows) == 4
+        assert {r["status"] for r in rows if r["case_id"] == "case_0"} == {"error"}
+        assert all("RuntimeError: agent crashed" == r["error"] for r in rows if r["status"] == "error")
 
     def test_invalid_concurrency_rejected(self, storage, tracer):
         with pytest.raises(ValueError, match="concurrency"):

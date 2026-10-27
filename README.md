@@ -18,7 +18,7 @@ worse?" into a CI gate with a yes/no answer backed by statistical tests —
 whatever layer the change came from.
 
 ```
-any agent change → run eval suite (baseline vs candidate) → McNemar + bootstrap → merge or block
+any agent change → replay baseline/candidate → calibrated clustered bootstrap gate → merge or block
 ```
 
 ## Features
@@ -29,9 +29,10 @@ any agent change → run eval suite (baseline vs candidate) → McNemar + bootst
 - **Two assertion layers** — cheap deterministic rules (output content, tool
   usage, turn/cost/latency budgets, workspace state) plus LLM-as-judge for
   semantic quality.
-- **Judge calibration** — judges are evaluated too: score your judge against a
-  human-labeled golden set (accuracy / Cohen's kappa / FPR / FNR) before you
-  trust it as a gate.
+- **Judge calibration admission** — accuracy / Cohen's kappa / FPR / FNR against
+  human labels, with defaults of 50 samples, 10 per class, kappa >= 0.6 and
+  FPR <= 0.05. `compare --require-calibration` checks the latest admitted record
+  for the exact judge backend, model and prompt hash.
 - **Simulated users with hidden goals** — multi-turn rollouts against personas,
   including adversarial ones (e.g. a user who plays nice while fishing for your
   system prompt). Rule assertions backstop the LLM judge so a lenient simulated
@@ -39,14 +40,19 @@ any agent change → run eval suite (baseline vs candidate) → McNemar + bootst
 - **Coding agents** — cases can carry a repo-snapshot fixture; each sample runs
   in a fresh copy and assertions check the final workspace state
   (`command_exit`, diff size limits) — the SWE-bench FAIL_TO_PASS pattern.
-- **Statistical gate** — pass^k sampling, McNemar's exact test and paired
-  bootstrap CIs. The gate blocks *significant* regressions, not noise.
+- **Statistical gate** — bootstrap whole cases, not individual correlated samples.
+  A minimum important regression margin and confidence interval yield pass,
+  regression or inconclusive; single-sample McNemar is diagnostic only.
+- **Trustworthy run manifests** — Git, dataset, model and judge configuration are
+  recorded; execution errors stay distinct from assertion failures. `compare`
+  rejects incomplete or incompatible runs before doing any statistics.
+- **CI reports** — JSON and JUnit XML for runs, JSON for comparisons/calibration,
+  plus uploaded trajectory diffs and the SQLite database as workflow artifacts.
 - **Parallel + rate-limit tolerant** — `--concurrency N` with exponential
   backoff on 429/5xx, so a rate-limited model plan slows the run instead of
   failing it.
 - **GitHub Actions ready** — the included workflow runs the target branch as
-  baseline and the PR as candidate, then blocks the merge on significant
-  regression (exit code 2).
+  baseline and the PR as candidate, then blocks on regression or inconclusive evidence.
 
 ## Quickstart
 
@@ -65,9 +71,13 @@ python -m agent_eval.cli simulate --scenarios examples/scenarios.yaml \
 python -m agent_eval.cli run --cases examples/cases_coding.yaml \
     --agent examples.coding_agent:agent
 
-# the gate: statistically compare two runs
-python -m agent_eval.cli compare baseline candidate    # exit 2 = significant regression
+# the offline demo has 12 cases; production keeps the default --min-cases 50
+python -m agent_eval.cli compare baseline candidate --min-cases 12
 python -m agent_eval.cli diff baseline candidate       # trajectory diff
+
+# production judge admission (defaults: 50+ labels, 10+ per human class)
+python -m agent_eval.cli calibrate --golden golden_production.yaml \
+    --judge-backend litellm --judge-model k3 --json-out calibration.json
 
 # case supply: distill new cases from recorded traces (tool_called derived
 # from the observed tool-call sequence)
@@ -100,19 +110,36 @@ trajectory assertions:
 
 ## How the CI gate works
 
-`.github/workflows/agent-eval.yml`: on every PR, a worktree of the target
-branch runs as `baseline`, your PR runs as `candidate`, both share run ids in
-one SQLite DB. `diff` always prints a trajectory report; `compare` exits 2 on
-significant regression and blocks the merge. The examples run fully offline
-(stub judge), so CI needs no secrets.
+`.github/workflows/agent-eval.yml`: every PR runs pytest, then one evaluator
+version runs the target worktree's agent as `baseline` and the PR agent as
+`candidate`. Both share run ids in one SQLite DB. Before statistics, `compare`
+checks manifests, case sets, dataset hashes, sample counts, judge/user config
+and sample status. Production judge gates should add `--require-calibration`;
+a missing or rejected latest calibration is invalid.
+
+For delta `B-A` and `--min-delta` (default 0.05), a CI upper bound below -0.05
+is an important regression (2); a lower bound at/above -0.05 is a pass (0);
+a crossing interval is inconclusive (3). Fewer than `--min-cases` (default 50)
+is also inconclusive. **Inconclusive is neither proof of regression nor evidence
+of safety**: add independent cases and inspect changed cases/traces rather than
+weakening thresholds just to make CI green.
+
+`run` / `simulate` exit codes: 0 = all passed, 1 = assertion failure,
+3 = execution error. `compare`: 0 = pass, 1 = invalid, 2 = regression,
+3 = inconclusive. `calibrate`: 0 = admitted, 4 = rejected. JSON reports contain
+the full decision inputs. The workflow uploads reports, diffs and eval.db for
+14 days. Redact real traces before uploading: artifacts may contain sensitive
+inputs and outputs. Legacy runs without a manifest remain readable but must be
+rerun before strict `compare`.
 
 ## Layout
 
 ```
 src/agent_eval/   tracing · storage · assertions · judge · retry · calibration
-                  stats · simulation · diff · distill · runner · cli
+                  stats · simulation · diff · distill · manifest · compare
+                  reporting · runner · cli
 examples/         toy + real (Kimi K3) agents, cases, scenarios, golden set
-tests/            249 offline pytest tests
+tests/            289 offline pytest tests
 ```
 
 ## License

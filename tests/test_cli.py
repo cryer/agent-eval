@@ -203,14 +203,13 @@ class TestCmdCompare:
 
     def test_no_regression_exit_zero(self, tmp_path, db_path, fake_agents, capsys):
         self._two_runs(tmp_path, db_path, "good_agent", "good_agent")
-        rc = main(["compare", "A", "B", "--db", db_path])
+        rc = main(["compare", "A", "B", "--db", db_path, "--min-cases", "8"])
         assert rc == 0
-        assert "no significant change" in capsys.readouterr().out
+        assert "NO MEANINGFUL REGRESSION" in capsys.readouterr().out
 
     def test_significant_regression_exit_two(self, tmp_path, db_path, fake_agents, capsys):
-        # 8/8 cases flip pass->fail: McNemar p = 2/2^8 < 0.05
         self._two_runs(tmp_path, db_path, "good_agent", "bad_agent")
-        rc = main(["compare", "A", "B", "--db", db_path])
+        rc = main(["compare", "A", "B", "--db", db_path, "--min-cases", "8"])
         assert rc == 2
         assert "SIGNIFICANT REGRESSION" in capsys.readouterr().out
 
@@ -221,19 +220,20 @@ class TestCmdCompare:
 
 
 class TestCmdCalibrate:
-    def test_stub_calibration_exit_zero(self, db_path, capsys):
+    def test_stub_calibration_is_rejected(self, db_path, capsys):
         rc = main([
             "calibrate", "--golden", str(GOLDEN_PATH),
             "--judge-backend", "stub", "--db", db_path,
         ])
-        assert rc == 0
+        assert rc == 4
         out = capsys.readouterr().out
         assert "accuracy=0.75" in out
         assert "kappa=0.50" in out
-        assert "WARNING" in out  # kappa < 0.6 warning
+        assert "admission: REJECTED" in out
         s = Storage(db_path)
         try:
             assert len(s.list_calibrations()) == 1
+            assert s.list_calibrations()[0]["admission"]["accepted"] is False
         finally:
             s.close()
 

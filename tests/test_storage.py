@@ -167,6 +167,49 @@ class TestRuns:
         assert {r["run_id"] for r in runs} == {"r1", "r2"}
 
 
+class TestExecutions:
+    def _manifest(self, execution_id="e1", source_key="case:cases.yaml"):
+        return {
+            "execution_id": execution_id,
+            "run_id": "r1",
+            "source_key": source_key,
+            "kind": "case",
+            "source_path": "cases.yaml",
+            "source_hash": "abc",
+            "case_ids": ["c1"],
+            "samples": 2,
+            "agent": "m:a",
+            "judge": {"backend": None},
+            "simulated_user": None,
+        }
+
+    def test_begin_finish_and_read_manifest(self, storage):
+        manifest = self._manifest()
+        storage.begin_execution(manifest)
+        assert storage.get_run_executions("r1")[0]["status"] == "running"
+        storage.finish_execution("e1", "completed")
+        row = storage.get_run_executions("r1")[0]
+        assert row["status"] == "completed"
+        assert row["case_ids"] == ["c1"]
+        assert row["metadata"]["source_hash"] == "abc"
+        assert row["finished_at"]
+
+    def test_rerun_replaces_same_source_but_keeps_other_source(self, storage):
+        storage.begin_execution(self._manifest("old"))
+        storage.begin_execution(self._manifest("other", "scenario:scenarios.yaml"))
+        storage.begin_execution(self._manifest("new"))
+        rows = storage.get_run_executions("r1")
+        assert len(rows) == 2
+        assert {r["execution_id"] for r in rows} == {"new", "other"}
+
+    def test_error_status_is_stored(self, storage):
+        storage.begin_execution(self._manifest())
+        storage.finish_execution("e1", "error", "agent failed")
+        row = storage.get_run_executions("r1")[0]
+        assert row["status"] == "error"
+        assert row["error"] == "agent failed"
+
+
 class TestCalibrations:
     def test_record_and_list(self, storage):
         metrics = {"accuracy": 0.75, "kappa": 0.5}
@@ -215,8 +258,11 @@ class TestMigration:
                 r["name"]
                 for r in storage._conn.execute("PRAGMA table_info(case_results)")
             }
-            assert "sample_idx" in cols
+            assert {"sample_idx", "status", "error"} <= cols
             _record(storage, "r1", "c1")  # works with default sample_idx=0
-            assert storage.get_run_results("r1")[0]["sample_idx"] == 0
+            row = storage.get_run_results("r1")[0]
+            assert row["sample_idx"] == 0
+            assert row["status"] == "completed"
+            assert row["error"] == ""
         finally:
             storage.close()

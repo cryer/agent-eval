@@ -61,13 +61,18 @@ def paired_bootstrap(
     values_b: list[float],
     n_boot: int = 10000,
     seed: int = 0,
+    alpha: float = 0.05,
 ) -> tuple[float, float, float]:
-    """Paired bootstrap over per-case pass rates.
+    """Bootstrap paired cases, keeping all samples within a case together.
 
-    Returns (mean difference B-A, 95% CI low, 95% CI high).
+    Returns (mean difference B-A, CI low, CI high) at 1-alpha confidence.
     """
     if len(values_a) != len(values_b) or not values_a:
         raise ValueError("paired_bootstrap needs two non-empty equal-length series")
+    if n_boot < 1:
+        raise ValueError("n_boot must be at least 1")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1")
     rng = random.Random(seed)
     n = len(values_a)
     diffs = []
@@ -76,4 +81,21 @@ def paired_bootstrap(
         diffs.append(sum(values_b[i] - values_a[i] for i in idx) / n)
     diffs.sort()
     mean = sum(values_b) / n - sum(values_a) / n
-    return mean, diffs[int(0.025 * n_boot)], diffs[min(n_boot - 1, int(0.975 * n_boot))]
+    return (
+        mean,
+        diffs[int((alpha / 2) * n_boot)],
+        diffs[min(n_boot - 1, int((1 - alpha / 2) * n_boot))],
+    )
+
+
+def classify_delta(mean: float, low: float, high: float, min_delta: float) -> str:
+    """Classify practical regression using a non-inferiority margin."""
+    if min_delta < 0 or min_delta > 1:
+        raise ValueError("min_delta must be between 0 and 1")
+    if high < -min_delta:
+        return "significant_regression"
+    if low > min_delta:
+        return "significant_improvement"
+    if low >= -min_delta:
+        return "no_meaningful_regression"
+    return "inconclusive"

@@ -19,65 +19,122 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install candidate and run unit tests
+        run: |
+          python -m pip install -q -e .
+          python -m pytest tests/ -q
+
       - name: Run baseline (target branch code)
         run: |
+          measure() {
+            set +e
+            "$@"
+            rc=$?
+            set -e
+            # 0 = pass, 1 = assertion failures (measurement data).
+            # 3 = execution errors and all other codes = infrastructure failure.
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+              return "$rc"
+            fi
+            return 0
+          }
+          mkdir -p "$GITHUB_WORKSPACE/reports"
           git worktree add ../baseline origin/${{ github.base_ref }}
-          python -m pip install -q -e ../baseline
+          # Keep one evaluator version on both sides; only the baseline agent/data
+          # come from the worktree. This also lets the evaluator itself evolve.
           cd ../baseline
-          # || true: failing cases are measurement data, not a job failure;
-          # only the compare step below is the gate
-          python -m agent_eval.cli run \
+          measure python -m agent_eval.cli run \
             --cases examples/cases.yaml \
             --agent examples.toy_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id baseline \
-            --db "$GITHUB_WORKSPACE/eval.db" || true
-          python -m agent_eval.cli simulate \
+            --db "$GITHUB_WORKSPACE/eval.db" \
+            --json-out "$GITHUB_WORKSPACE/reports/baseline-cases.json" \
+            --junit-out "$GITHUB_WORKSPACE/reports/baseline-cases.xml"
+          measure python -m agent_eval.cli simulate \
             --scenarios examples/scenarios.yaml \
             --agent examples.toy_chat_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id baseline \
-            --db "$GITHUB_WORKSPACE/eval.db" || true
-          python -m agent_eval.cli run \
+            --db "$GITHUB_WORKSPACE/eval.db" \
+            --json-out "$GITHUB_WORKSPACE/reports/baseline-scenarios.json" \
+            --junit-out "$GITHUB_WORKSPACE/reports/baseline-scenarios.xml"
+          measure python -m agent_eval.cli run \
             --cases examples/cases_coding.yaml \
             --agent examples.coding_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id baseline \
-            --db "$GITHUB_WORKSPACE/eval.db" || true
+            --db "$GITHUB_WORKSPACE/eval.db" \
+            --json-out "$GITHUB_WORKSPACE/reports/baseline-coding.json" \
+            --junit-out "$GITHUB_WORKSPACE/reports/baseline-coding.xml"
 
       - name: Run candidate (this PR)
         run: |
+          measure() {
+            set +e
+            "$@"
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+              return "$rc"
+            fi
+            return 0
+          }
+          mkdir -p reports
           python -m pip install -q -e .
-          python -m agent_eval.cli run \
+          measure python -m agent_eval.cli run \
             --cases examples/cases.yaml \
             --agent examples.toy_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
-            --db eval.db || true
-          python -m agent_eval.cli simulate \
+            --db eval.db \
+            --json-out reports/candidate-cases.json \
+            --junit-out reports/candidate-cases.xml
+          measure python -m agent_eval.cli simulate \
             --scenarios examples/scenarios.yaml \
             --agent examples.toy_chat_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
-            --db eval.db || true
-          python -m agent_eval.cli run \
+            --db eval.db \
+            --json-out reports/candidate-scenarios.json \
+            --junit-out reports/candidate-scenarios.xml
+          measure python -m agent_eval.cli run \
             --cases examples/cases_coding.yaml \
             --agent examples.coding_agent:agent \
             --judge-backend stub \
             --samples 2 \
             --run-id candidate \
-            --db eval.db || true
+            --db eval.db \
+            --json-out reports/candidate-coding.json \
+            --junit-out reports/candidate-coding.xml
 
       - name: Trace diff report
         if: always()
-        run: python -m agent_eval.cli diff baseline candidate --db eval.db
+        run: |
+          mkdir -p reports
+          python -m agent_eval.cli diff baseline candidate --db eval.db | tee reports/diff.txt
 
       - name: Regression gate
         if: always()
-        run: python -m agent_eval.cli compare baseline candidate --db eval.db
-        # exit 2 = significant regression -> job fails -> PR blocked
+        run: |
+          mkdir -p reports
+          python -m agent_eval.cli compare baseline candidate --db eval.db \
+            --min-cases 12 \
+            --json-out reports/compare.json
+        # exit 1 = invalid, 2 = regression, 3 = inconclusive; all block
+
+      - name: Upload evaluation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eval-reports
+          path: |
+            reports/
+            eval.db
+          if-no-files-found: warn
+          retention-days: 14

@@ -156,6 +156,7 @@ def rollout(
     scenario: Scenario,
     tracer,
     sample_idx: int = 0,
+    error_sink: list[Exception] | None = None,
 ) -> tuple[list[dict], str, str, float]:
     """Drive agent <-> simulated user until user is done or max_turns hit.
 
@@ -170,19 +171,27 @@ def rollout(
         root.set_attribute("scenario.persona_style", user.persona.style)
         trace_id = f"{root.get_span_context().trace_id:032x}"
 
-        while sum(1 for m in history if m["role"] == "user") < scenario.max_turns:
-            user_msg = user.next_message(history)
-            if user_msg is None:
-                ended = "user_done"
-                break
-            history.append({"role": "user", "content": user_msg})
+        try:
+            while sum(1 for m in history if m["role"] == "user") < scenario.max_turns:
+                user_msg = user.next_message(history)
+                if user_msg is None:
+                    ended = "user_done"
+                    break
+                history.append({"role": "user", "content": user_msg})
 
-            turn_no = sum(1 for m in history if m["role"] == "user")
-            with tracer.start_as_current_span(f"turn.{turn_no}") as turn:
-                turn.set_attribute("user.message", user_msg)
-                reply, _ = _normalize_agent_result(agent_fn(history))
-                turn.set_attribute("assistant.message", reply)
-            history.append({"role": "assistant", "content": reply})
+                turn_no = sum(1 for m in history if m["role"] == "user")
+                with tracer.start_as_current_span(f"turn.{turn_no}") as turn:
+                    turn.set_attribute("user.message", user_msg)
+                    reply, _ = _normalize_agent_result(agent_fn(history))
+                    turn.set_attribute("assistant.message", reply)
+                history.append({"role": "assistant", "content": reply})
+        except Exception as exc:
+            if error_sink is None:
+                raise
+            error_sink.append(exc)
+            ended = "error"
+            root.set_attribute("scenario.error", f"{type(exc).__name__}: {exc}")
+            root.record_exception(exc)
 
         root.set_attribute("scenario.ended", ended)
         root.set_attribute("scenario.transcript", format_transcript(history))
@@ -201,8 +210,9 @@ def _run_scenario_sample(
     sample_idx: int,
 ) -> SampleReport:
     user = SimulatedUser(scenario.persona, backend=user_backend)
+    errors: list[Exception] = []
     history, ended, trace_id, duration_ms = rollout(
-        agent_fn, user, scenario, tracer, sample_idx
+        agent_fn, user, scenario, tracer, sample_idx, error_sink=errors
     )
     transcript = format_transcript(history)
     turns = sum(1 for m in history if m["role"] == "user")
@@ -211,17 +221,25 @@ def _run_scenario_sample(
     cost_usd = sum(
         float(s["attributes"].get("gen_ai.usage.cost_usd", 0.0)) for s in spans
     )
-    ctx = CaseContext(
-        case_id=scenario.id,
-        input=pseudo_case.input,
-        output=transcript,
-        turns=turns,
-        spans=spans,
-        cost_usd=cost_usd,
-        duration_ms=duration_ms,
-    )
-    results = [a.check(ctx) for a in scenario.assertions]
-    passed = all(r.passed for r in results)
+    status = "error" if errors else "completed"
+    error = f"{type(errors[0]).__name__}: {errors[0]}" if errors else ""
+    results: list[AssertionResult] = []
+    if not errors:
+        ctx = CaseContext(
+            case_id=scenario.id,
+            input=pseudo_case.input,
+            output=transcript,
+            turns=turns,
+            spans=spans,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+        )
+        try:
+            results = [a.check(ctx) for a in scenario.assertions]
+        except Exception as exc:
+            status = "error"
+            error = f"{type(exc).__name__}: {exc}"
+    passed = status == "completed" and all(r.passed for r in results)
 
     storage.record_case_result(
         run_id=run_id,
@@ -235,6 +253,8 @@ def _run_scenario_sample(
         trace_id=trace_id,
         duration_ms=duration_ms,
         cost_usd=cost_usd,
+        status=status,
+        error=error,
     )
     return SampleReport(
         sample_idx=sample_idx,
@@ -244,6 +264,8 @@ def _run_scenario_sample(
         trace_id=trace_id,
         duration_ms=duration_ms,
         cost_usd=cost_usd,
+        status=status,
+        error=error,
     )
 
 
